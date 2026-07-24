@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+site.yaml
+tests/gt_dump
+tests/.test_scratch/
+*.egg-info/
+build/

@@ -1,0 +1,29 @@
+# Per-machine configuration. Copy to site.yaml (git-ignored) on each
+# machine and edit. Read by cluster/ scripts; the python API takes these
+# as explicit arguments, so this file is convenience, not a dependency.
+
+# ---- CPU cluster (label inversions) ----
+cpu:
+  host: cpu-cluster.example.edu          # ssh alias
+  stic_binary: /sml/zbindenj/coupled_stic/src/STiC.x
+  mpiexec: mpiexec
+  template_dir: /sml/zbindenj/coupled_stic/inv_fovb_w7_t=013
+  aux_search:
+    - /sml/zbindenj/coupled_stic/input_files
+    - /sml/zbindenj/coupled_stic
+  work_root: /sml/zbindenj/STiC_emul_runs
+  slurm_partition: null
+  slurm_ntasks: 32
+  slurm_time: "04:00:00"
+
+# ---- GPU cluster (training + prediction) ----
+gpu:
+  host: gpu-cluster.example.edu
+  work_root: /scratch/zbindenj/STiC_emul_runs
+  n_gpus: 4
+
+# ---- laptop (development, small tile runs) ----
+laptop:
+  stic_binary: /Users/jonaszbinden/Documents/GitHub/coupled_stic/src/STiC.x
+  mpiexec: /Users/jonaszbinden/anaconda3/envs/stic/bin/mpiexec
+  nproc: 8
