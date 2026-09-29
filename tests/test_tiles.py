@@ -53,12 +53,13 @@ img_full = gaussian_filter(img_full, 2.0)
 img_tile = img_full[MY0:MY0 + TNY, MX0:MX0 + TNX]
 
 for reg in REGIONS:
+    base = os.path.basename(reg)      # tile run dirs are flat
     D_full = dg.build_region_operator(os.path.join(SRC, reg),
                                       MODEL_NX, MODEL_NY)
-    D_tile = dg.build_region_operator(os.path.join(OUT, reg), TNX, TNY)
+    D_tile = dg.build_region_operator(os.path.join(OUT, base), TNX, TNY)
 
-    ox0, ox1, oy0, oy1 = meta['regions'][reg]['window']
-    ny_t, nx_t = meta['regions'][reg]['ny'], meta['regions'][reg]['nx']
+    ox0, ox1, oy0, oy1 = meta['regions'][base]['window']
+    ny_t, nx_t = meta['regions'][base]['ny'], meta['regions'][base]['nx']
 
     y_full = (D_full @ img_full.ravel()).reshape(-1)
     with np.errstate(all='ignore'):
@@ -74,7 +75,7 @@ for reg in REGIONS:
     # tile_obs masks every pixel whose operator row cannot be exact
     # (coarse: dual coverage; fine with PSF: PSF coverage), so
     # pweights > 0 is the exactness guarantee for all region types
-    tob = tiles.CoupledObs(os.path.join(OUT, reg))
+    tob = tiles.CoupledObs(os.path.join(OUT, base))
     active = tob.pweights[0] > 0
 
     err = np.abs(y_tile - y_full)[active]

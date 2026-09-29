@@ -103,13 +103,21 @@ class CoupledObs:
 # --------------------------------------------------------------------------- #
 
 def parse_regions(cfg_text):
-    """Return list of dicts for the active region lines of an input.cfg."""
+    """Return list of dicts for the active region lines of an input.cfg.
+
+    Inline '#' comments are stripped; file entries may carry relative
+    subdirectory paths (input.cfg written for a launch dir above the
+    run dir).
+    """
     regions = []
     for ln in cfg_text.splitlines():
         m = re.match(r'^\s*region\s*=\s*(.+)$', ln)
         if not m:
             continue
-        parts = [p.strip() for p in m.group(1).split(',')]
+        payload = m.group(1).split('#')[0]
+        parts = [p.strip() for p in payload.split(',')]
+        if len(parts) < 7:
+            continue
         regions.append(dict(w0=float(parts[0]), dw=float(parts[1]),
                             nw=int(parts[2]), cscal=float(parts[3]),
                             inst=parts[4], inst_file=parts[5],
@@ -282,25 +290,46 @@ def extract_tile_rundir(src_dir, out_dir, mx0, my0, tnx, tny,
     with open(os.path.join(src_dir, 'input.cfg')) as f:
         cfg_text = f.read()
     regions = parse_regions(cfg_text)
-    model_file = read_cfg_key(cfg_text, 'input_model')
+    overrides = dict(cfg_overrides or {})
+
+    # Region/model entries may carry subdirectory paths (cfg written for
+    # a launch dir above the run dir). The tile run dir is flat: files
+    # land under their basenames and the cfg lines are rewritten below.
+    seen = {}
+    for reg in regions:
+        for key in ('obs_file', 'inst_file'):
+            rel = reg[key]
+            base = os.path.basename(rel)
+            if seen.setdefault(base, rel) != rel:
+                raise ValueError(
+                    f'region files {seen[base]!r} and {rel!r} collide on '
+                    f'basename {base!r}; cannot flatten the tile run dir')
 
     meta = dict(mx0=mx0, my0=my0, tnx=tnx, tny=tny, regions={})
 
     for reg in regions:
+        obs_base = os.path.basename(reg['obs_file'])
         obs = CoupledObs(os.path.join(src_dir, reg['obs_file']))
         tob, win = tile_obs(obs, mx0, my0, tnx, tny)
-        tob.write(os.path.join(out_dir, reg['obs_file']))
-        meta['regions'][reg['obs_file']] = dict(
+        tob.write(os.path.join(out_dir, obs_base))
+        meta['regions'][obs_base] = dict(
             window=win, ny=tob.ny, nx=tob.nx,
             masked=float((tob.pweights == 0).mean()))
         # instrumental profile: spectral only, copy/link unchanged
         src_inst = os.path.join(src_dir, reg['inst_file'])
-        dst_inst = os.path.join(out_dir, reg['inst_file'])
+        dst_inst = os.path.join(out_dir, os.path.basename(reg['inst_file']))
         if os.path.isfile(src_inst) and not os.path.exists(dst_inst):
             os.symlink(os.path.abspath(src_inst), dst_inst)
 
+    # honor an input_model override (bootstrap rounds initialize tiles
+    # from the previous round's prediction) — the override names the
+    # SOURCE file in src_dir; the tile slice lands under its basename
+    model_file = overrides.get('input_model') \
+        or read_cfg_key(cfg_text, 'input_model')
+    model_base = os.path.basename(model_file)
     tile_model(os.path.join(src_dir, model_file),
-               os.path.join(out_dir, model_file), mx0, my0, tnx, tny)
+               os.path.join(out_dir, model_base), mx0, my0, tnx, tny)
+    overrides['input_model'] = model_base
 
     # auxiliary inputs — missing ones make RH segfault (unchecked fopen),
     # so fail loudly here instead
@@ -321,10 +350,20 @@ def extract_tile_rundir(src_dir, out_dir, mx0, my0, tnx, tny,
             f'auxiliary inputs not found in src_dir or aux_search: '
             f'{missing} — RH would segfault without them')
 
-    # patched input.cfg
-    overrides = dict(cfg_overrides or {})
+    # patched input.cfg: apply key overrides and flatten region-file
+    # entries to their basenames (other fields kept verbatim)
     lines = []
     for ln in cfg_text.splitlines():
+        rm = re.match(r'^(\s*region\s*=\s*)(.+)$', ln)
+        if rm:
+            parts = [p.strip() for p in rm.group(2).split('#')[0].split(',')]
+            if len(parts) >= 7:
+                parts[5] = os.path.basename(parts[5])
+                parts[6] = os.path.basename(parts[6])
+                lines.append(rm.group(1) + ', '.join(parts))
+            else:
+                lines.append(ln)
+            continue
         m = re.match(r'^\s*([A-Za-z_0-9]+)\s*=', ln)
         if m and m.group(1) in overrides:
             key = m.group(1)
@@ -336,11 +375,12 @@ def extract_tile_rundir(src_dir, out_dir, mx0, my0, tnx, tny,
     with open(os.path.join(out_dir, 'input.cfg'), 'w') as f:
         f.write('\n'.join(lines) + '\n')
 
+    obs_bases = [os.path.basename(r['obs_file']) for r in regions]
     np.savez(os.path.join(out_dir, 'tile_meta.npz'), **{
         'mx0': mx0, 'my0': my0, 'tnx': tnx, 'tny': tny,
-        'windows': np.array([meta['regions'][r['obs_file']]['window']
-                             for r in regions]),
-        'obs_files': np.array([r['obs_file'] for r in regions])})
+        'windows': np.array([meta['regions'][b]['window']
+                             for b in obs_bases]),
+        'obs_files': np.array(obs_bases)})
     return meta
 
 
