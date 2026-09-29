@@ -184,30 +184,52 @@ def tile_obs(obs, mx0, my0, tnx, tny):
     out.pweights = obs.pweights[:, oy0:oy1, ox0:ox1].copy()
     out.ny, out.nx = out.dat.shape[1], out.dat.shape[2]
 
-    # Coverage masking for coarse regions (extends the prepInv.py
-    # convention). Two criteria, both computed with the FULL-grid
-    # operators, because the tile's own operators are row-normalized and
-    # cannot see lost area:
-    #  (a) model-space: the pixel's full-chain footprint lies in the tile
-    #  (b) warp-space: its rebin support lies in the tile — warp-output
-    #      cells beyond the tile edge can sample model pixels back
-    #      INSIDE the tile (e.g. ds_x ~ -2), which the truncated tile
-    #      warp cannot represent even though (a) holds.
+    # Coverage masking (extends the prepInv.py convention). Criteria are
+    # computed with the FULL-grid operators, because the tile's own
+    # operators are row-normalized and cannot see lost area:
+    #  (a) model-space: the pixel's full-chain footprint (INCLUDING the
+    #      spatial PSF, when present) lies in the tile
+    #  (b) warp-space (coarse regions): its rebin support lies in the
+    #      tile — warp-output cells beyond the tile edge can sample
+    #      model pixels back INSIDE the tile (e.g. ds_x ~ -2), which the
+    #      truncated tile warp cannot represent even though (a) holds.
     # Pixels failing either get weight 0; every pixel that participates
     # in the tile inversion then has an operator row identical to the
     # full-FOV one.
+    has_psf = obs.psf.size and obs.psf.sum() >= 1e-12
     if int(out.lts[0]) == 10:
         covM, covW = _coverage_from_full(obs, mx0, my0, tnx, tny,
                                          ox0, ox1, oy0, oy1)
         out.pweights = out.pweights * \
             ((covM >= 0.9999) & (covW >= 0.9999))[None]
+    elif has_psf:
+        # fine-grid region with a PSF: rows whose footprint leaves the
+        # tile renormalize differently and cannot be reproduced
+        ind = np.zeros((obs.ny, obs.nx))
+        ind[my0:my0 + tny, mx0:mx0 + tnx] = 1.0
+        covF = _psf_coverage(obs.psf, ind)[oy0:oy1, ox0:ox1]
+        out.pweights = out.pweights * (covF >= 0.9999)[None]
     return out, (ox0, ox1, oy0, oy1)
+
+
+def _psf_coverage(psf, ind):
+    """(P @ ind) for the row-normalized full-grid PSF operator, computed
+    by correlation instead of a sparse matrix. ndimage's default kernel
+    center (size//2) matches STiC's c = shape//2 convention (verified
+    for odd and even sizes against degradation.psf_matrix)."""
+    from scipy.ndimage import correlate
+    p = np.asarray(psf, 'float64')
+    p = p / p.sum()
+    num = correlate(ind, p, mode='constant', cval=0.0)
+    den = correlate(np.ones_like(ind), p, mode='constant', cval=0.0)
+    return num / den
 
 
 def _coverage_from_full(obs, mx0, my0, tnx, tny, ox0, ox1, oy0, oy1):
     """Per observed pixel of the tile window, the in-tile weight fraction
-    of (a) the full-chain footprint in model space and (b) the rebin
-    support in warp-output space, both from the FULL-grid operators."""
+    of (a) the full-chain footprint (PSF + warp + rebin) in model space
+    and (b) the rebin support in warp-output space, both from the
+    FULL-grid operators."""
     a = obs.ltargs[:12]
     nx, ny = int(a[6]), int(a[7])
     W = dg.destretch_matrix(nx, ny, obs.ds[0], obs.ds[1])
@@ -215,7 +237,9 @@ def _coverage_from_full(obs, mx0, my0, tnx, tny, ox0, ox1, oy0, oy1):
                         nx, ny, a[8], a[9], a[10], a[11])
     ind = np.zeros((ny, nx))
     ind[my0:my0 + tny, mx0:mx0 + tnx] = 1.0
-    covM = (R @ (W @ ind.ravel())).reshape(int(a[1]), int(a[0]))
+    base = _psf_coverage(obs.psf, ind) \
+        if (obs.psf.size and obs.psf.sum() >= 1e-12) else ind
+    covM = (R @ (W @ base.ravel())).reshape(int(a[1]), int(a[0]))
     covW = (R @ ind.ravel()).reshape(int(a[1]), int(a[0]))
     return (covM[oy0:oy1, ox0:ox1], covW[oy0:oy1, ox0:ox1])
 

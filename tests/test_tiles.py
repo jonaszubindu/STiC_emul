@@ -16,14 +16,27 @@ from emulator import tiles
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.environ.get('STIC_EMUL_TEST_DATA', '')
-OUT = os.path.join(HERE, '.test_scratch', 'tile_36_28_48x44')
+OUT = os.path.join(HERE, '.test_scratch', 'tile_test')
 
 if not (SRC and os.path.isfile(os.path.join(SRC, 'input.cfg'))):
     import sys
     print('SKIP: set STIC_EMUL_TEST_DATA to a coupled run dir with input.cfg')
     sys.exit(0)
-MODEL_N = 140
-MX0, MY0, TNX, TNY = 36, 28, 48, 44
+
+# geometry and region list from the run dir itself
+from netCDF4 import Dataset
+with open(os.path.join(SRC, 'input.cfg')) as f:
+    _cfg = f.read()
+REGIONS = [r['obs_file'] for r in tiles.parse_regions(_cfg)]
+with Dataset(os.path.join(SRC, tiles.read_cfg_key(_cfg, 'input_model'))) as f:
+    MODEL_NY = len(f.dimensions['y'])
+    MODEL_NX = len(f.dimensions['x'])
+TNX = min(48, MODEL_NX // 2)
+TNY = min(44, MODEL_NY // 2)
+MX0 = (MODEL_NX - TNX) // 3
+MY0 = (MODEL_NY - TNY) // 3
+print(f'model {MODEL_NY}x{MODEL_NX}, tile {TNY}x{TNX} at ({MY0},{MX0}), '
+      f'regions {REGIONS}')
 
 shutil.rmtree(OUT, ignore_errors=True)
 rng = np.random.default_rng(11)
@@ -33,15 +46,15 @@ meta = tiles.extract_tile_rundir(SRC, OUT, MX0, MY0, TNX, TNY,
                                  require_aux=False)
 print('tile meta:', {k: v for k, v in meta['regions'].items()})
 
-img_full = rng.normal(1.0, 0.3, (MODEL_N, MODEL_N))
+img_full = rng.normal(1.0, 0.3, (MODEL_NY, MODEL_NX))
 # make it smooth-ish so numbers are O(1)
 from scipy.ndimage import gaussian_filter
 img_full = gaussian_filter(img_full, 2.0)
 img_tile = img_full[MY0:MY0 + TNY, MX0:MX0 + TNX]
 
-for reg in ('obs_8542.nc', 'obs_6302.nc', 'obs_3934.nc'):
+for reg in REGIONS:
     D_full = dg.build_region_operator(os.path.join(SRC, reg),
-                                      MODEL_N, MODEL_N)
+                                      MODEL_NX, MODEL_NY)
     D_tile = dg.build_region_operator(os.path.join(OUT, reg), TNX, TNY)
 
     ox0, ox1, oy0, oy1 = meta['regions'][reg]['window']
@@ -52,21 +65,17 @@ for reg in ('obs_8542.nc', 'obs_6302.nc', 'obs_3934.nc'):
         y_tile = (D_tile @ img_tile.ravel()).reshape(ny_t, nx_t)
 
     # full-op output restricted to the tile's observed window
-    nyF = int(np.sqrt(D_full.shape[0])) if reg != 'obs_6302.nc' else None
-    # derive full output dims from operator shape and window
     obs = tiles.CoupledObs(os.path.join(SRC, reg))
     y_full = y_full.reshape(obs.ny, obs.nx)[oy0:oy1, ox0:ox1]
 
     # The load-bearing property: every obs pixel that PARTICIPATES in the
     # tile inversion (pixel_weight > 0) must have an operator row
     # identical to the full-FOV one.
+    # tile_obs masks every pixel whose operator row cannot be exact
+    # (coarse: dual coverage; fine with PSF: PSF coverage), so
+    # pweights > 0 is the exactness guarantee for all region types
     tob = tiles.CoupledObs(os.path.join(OUT, reg))
-    if reg == 'obs_3934.nc':
-        # fine-grid region: interior = PSF footprint inside tile; here
-        # the operator is identity, so everything must match
-        active = np.ones((ny_t, nx_t), bool)
-    else:
-        active = tob.pweights[0] > 0
+    active = tob.pweights[0] > 0
 
     err = np.abs(y_tile - y_full)[active]
     print(f'{reg}: obs window x[{ox0}:{ox1}] y[{oy0}:{oy1}] '

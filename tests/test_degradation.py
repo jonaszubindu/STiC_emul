@@ -29,8 +29,20 @@ if not os.path.isfile(GT):
             STIC_SRC, 'linear_transformations.hpp'))):
         print('SKIP: set STIC_SRC to coupled_stic/src to build gt_dump')
         sys.exit(0)
-    subprocess.run(['clang++', '-O2', '-std=c++14', f'-I{STIC_SRC}',
-                    '-I/usr/local/include',
+    cxx = os.environ.get('CXX',
+                         'clang++' if sys.platform == 'darwin' else 'g++')
+    eig = os.environ.get('STIC_EMUL_EIGEN_INC')
+    if not eig:
+        cands = ['/usr/local/include', '/usr/include',
+                 os.path.join(os.environ.get('CONDA_PREFIX', '/nonexistent'),
+                              'include')]
+        eig = next((c for c in cands if os.path.isdir(
+            os.path.join(c, 'eigen3', 'Eigen'))), None)
+    if not eig:
+        print('SKIP: Eigen not found — set STIC_EMUL_EIGEN_INC to the '
+              'include dir that contains eigen3/')
+        sys.exit(0)
+    subprocess.run([cxx, '-O2', '-std=c++14', f'-I{STIC_SRC}', f'-I{eig}',
                     os.path.join(HERE, 'gt_dump.cc'), '-o', GT], check=True)
 os.makedirs(SCRATCH, exist_ok=True)
 rng = np.random.default_rng(3)
@@ -130,10 +142,18 @@ compare('bintrim (type 4)', mine, gt)
 # 5. full composite operators from the real run directory
 # --------------------------------------------------------------------------- #
 from netCDF4 import Dataset
+from emulator import tiles
 
-MODEL_NX = MODEL_NY = 140
+with open(os.path.join(RUN_DIR, 'input.cfg')) as f:
+    _cfg = f.read()
+REGIONS = [r['obs_file'] for r in tiles.parse_regions(_cfg)]
+with Dataset(os.path.join(RUN_DIR,
+                          tiles.read_cfg_key(_cfg, 'input_model'))) as f:
+    MODEL_NY = len(f.dimensions['y'])
+    MODEL_NX = len(f.dimensions['x'])
+print(f'model grid {MODEL_NY}x{MODEL_NX}, regions {REGIONS}')
 
-for reg in ('obs_8542.nc', 'obs_6302.nc', 'obs_3934.nc'):
+for reg in REGIONS:
     fobs = os.path.join(RUN_DIR, reg)
     with Dataset(fobs) as f:
         ny_o = len(f.dimensions['y']); nx_o = len(f.dimensions['x'])
@@ -181,8 +201,12 @@ for reg in ('obs_8542.nc', 'obs_6302.nc', 'obs_3934.nc'):
         (reg, mine_D.shape, (ny_o * nx_o, MODEL_NX * MODEL_NY))
     compare(f'composite {reg}', mine_D, gt_D, tol=1e-11)
 
-    # ---- application check: numpy vs torch, random image ------------------ #
-    import torch
+    # ---- application check: numpy vs torch (skipped without torch) -------- #
+    try:
+        import torch
+    except ImportError:
+        print('  apply: torch not installed, torch check skipped')
+        continue
     op = dg.TorchRegionOperator(mine_D, (ny_o, nx_o), (MODEL_NY, MODEL_NX),
                                 dtype=torch.float64)
     img = rng.normal(1.0, 0.3, (3, MODEL_NY, MODEL_NX))   # 3 "wavelengths"
