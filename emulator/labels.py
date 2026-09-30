@@ -370,6 +370,11 @@ def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None):
             c2, _ = _region_chi2(run_dir, reg['obs_file'])
             rec_out[f'{tag}_chi2'] = c2
 
+    if not any(k.endswith('_chi2') for k in rec_out):
+        print('WARNING: no out_<obs>.nc degraded synthetics found in '
+              f'{run_dir} — pixel_chi2 is all zero, so NO chi2 filtering '
+              'will happen. Run one STiC iteration that writes them, or '
+              'treat these labels as unvetted.')
     if out_file is None:
         os.makedirs(os.path.join(run_dir, 'labels'), exist_ok=True)
         out_file = os.path.join(run_dir, 'labels', 'full_map.npz')

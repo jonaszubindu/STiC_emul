@@ -29,7 +29,7 @@ CHI2_MAX = None            # drop label tiles with any region chi2 above this
 # what makes a PARTIALLY converged map usable as a label source.
 PIXEL_CHI2_MAX = 3.0
 MAX_PIX_PER_TILE = 2048    # decoder pixels per record per training step
-DEVICE = 'mps'             # 'cuda' | 'mps' | 'cpu'
+DEVICE = 'auto'            # 'auto' (cuda > mps > cpu) | 'cuda' | 'mps' | 'cpu'
 SEED = 1234
 
 # ---- prediction ----------------------------------------------------------- #

@@ -19,8 +19,12 @@ from .net import CoupledEmulator, loss_fn, make_depth_groups
 
 def _device():
     want = C.DEVICE
+    if want == 'auto':
+        want = 'cuda' if torch.cuda.is_available() else (
+            'mps' if torch.backends.mps.is_available() else 'cpu')
     if want == 'cuda' and not torch.cuda.is_available():
-        want = 'mps' if torch.backends.mps.is_available() else 'cpu'
+        print('WARNING: cuda requested but unavailable; using cpu')
+        want = 'cpu'
     if want == 'mps' and not torch.backends.mps.is_available():
         want = 'cpu'
     return torch.device(want)
