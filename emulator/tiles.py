@@ -19,6 +19,12 @@ the tile's operators are consistent with the full-FOV ones:
 Following tools/prepInv.py, coarse-region pixels whose footprint is not
 fully covered by the tile get pixel_weight = 0 (coverage = warp+rebin of
 a ones-image, threshold 0.9999).
+
+Per-pixel inputs on the model grid are sliced to the tile, because STiC
+indexes them with the run's own (tile-local) pixel coordinates:
+  - instrumental profiles with shape (ny, nx, nw) (psf(yy, xx, :) in
+    master_sparse.cc / comm.cc); 1-D profiles are copied unchanged
+  - an optional inversion_mask file (ny, nx)
 """
 
 import os
@@ -277,6 +283,50 @@ AUX_LINKS = ['Atoms', 'Molecules', 'Atmos', 'atoms.input', 'kurucz.input',
              'keyword.input', 'molecules.input']
 
 
+def _model_grid_dims(model_path):
+    from netCDF4 import Dataset
+    with Dataset(model_path) as f:
+        return len(f.dimensions['y']), len(f.dimensions['x'])
+
+
+def tile_model_grid_file(src, dst, var_name, mx0, my0, tnx, tny,
+                         model_ny, model_nx):
+    """Copy a netCDF input to the tile dir, slicing every variable along
+    the two dimensions that are the first two axes of `var_name` when
+    that variable lives on the model grid (ndim >= 2). Otherwise (e.g. a
+    1-D instrumental profile) the file is copied unchanged.
+
+    Never writes through an existing symlink at dst (old tile dirs linked
+    inst files straight to the full-FOV originals).
+    """
+    from netCDF4 import Dataset
+    if os.path.lexists(dst):
+        os.remove(dst)
+    with Dataset(src) as fi, Dataset(dst, 'w', format='NETCDF4') as fo:
+        key = fi.variables.get(var_name)
+        sdims = ()
+        if key is not None and key.ndim >= 2:
+            if tuple(key.shape[:2]) != (model_ny, model_nx):
+                raise ValueError(
+                    f'{src}: {var_name} has spatial shape {key.shape[:2]}, '
+                    f'expected the model grid ({model_ny}, {model_nx}); '
+                    'STiC indexes it by model pixel, so it cannot be tiled')
+            sdims = key.dimensions[:2]
+        cut = {sdims[0]: (my0, tny), sdims[1]: (mx0, tnx)} if sdims else {}
+        for name, dim in fi.dimensions.items():
+            n = None if dim.isunlimited() else len(dim)
+            if name in cut:
+                n = cut[name][1]
+            fo.createDimension(name, n)
+        for name, var in fi.variables.items():
+            ov = fo.createVariable(name, var.dtype, var.dimensions)
+            ov.setncatts({k: var.getncattr(k) for k in var.ncattrs()})
+            idx = tuple(slice(cut[d][0], cut[d][0] + cut[d][1])
+                        if d in cut else slice(None)
+                        for d in var.dimensions)
+            ov[:] = var[idx] if var.ndim else var.getValue()
+
+
 def extract_tile_rundir(src_dir, out_dir, mx0, my0, tnx, tny,
                         cfg_overrides=None, aux_search=(),
                         require_aux=True):
@@ -307,6 +357,14 @@ def extract_tile_rundir(src_dir, out_dir, mx0, my0, tnx, tny,
 
     meta = dict(mx0=mx0, my0=my0, tnx=tnx, tny=tny, regions={})
 
+    # honor an input_model override (bootstrap rounds initialize tiles
+    # from the previous round's prediction) — the override names the
+    # SOURCE file in src_dir; the tile slice lands under its basename
+    model_file = overrides.get('input_model') \
+        or read_cfg_key(cfg_text, 'input_model')
+    model_base = os.path.basename(model_file)
+    model_ny, model_nx = _model_grid_dims(os.path.join(src_dir, model_file))
+
     for reg in regions:
         obs_base = os.path.basename(reg['obs_file'])
         obs = CoupledObs(os.path.join(src_dir, reg['obs_file']))
@@ -315,21 +373,27 @@ def extract_tile_rundir(src_dir, out_dir, mx0, my0, tnx, tny,
         meta['regions'][obs_base] = dict(
             window=win, ny=tob.ny, nx=tob.nx,
             masked=float((tob.pweights == 0).mean()))
-        # instrumental profile: spectral only, copy/link unchanged
+        # instrumental profile: per-pixel (ny, nx, nw) profiles are
+        # indexed by tile-local pixel in STiC, so slice them
         src_inst = os.path.join(src_dir, reg['inst_file'])
         dst_inst = os.path.join(out_dir, os.path.basename(reg['inst_file']))
-        if os.path.isfile(src_inst) and not os.path.exists(dst_inst):
-            os.symlink(os.path.abspath(src_inst), dst_inst)
+        if os.path.isfile(src_inst):
+            tile_model_grid_file(src_inst, dst_inst, 'iprof', mx0, my0,
+                                 tnx, tny, model_ny, model_nx)
 
-    # honor an input_model override (bootstrap rounds initialize tiles
-    # from the previous round's prediction) — the override names the
-    # SOURCE file in src_dir; the tile slice lands under its basename
-    model_file = overrides.get('input_model') \
-        or read_cfg_key(cfg_text, 'input_model')
-    model_base = os.path.basename(model_file)
     tile_model(os.path.join(src_dir, model_file),
                os.path.join(out_dir, model_base), mx0, my0, tnx, tny)
     overrides['input_model'] = model_base
+
+    # optional inversion mask on the model grid (writeInversionMask)
+    mask_file = overrides.get('inversion_mask') \
+        or read_cfg_key(cfg_text, 'inversion_mask')
+    if mask_file:
+        mask_base = os.path.basename(mask_file)
+        tile_model_grid_file(os.path.join(src_dir, mask_file),
+                             os.path.join(out_dir, mask_base), 'mask',
+                             mx0, my0, tnx, tny, model_ny, model_nx)
+        overrides['inversion_mask'] = mask_base
 
     # auxiliary inputs — missing ones make RH segfault (unchecked fopen),
     # so fail loudly here instead

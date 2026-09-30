@@ -85,4 +85,60 @@ for reg in REGIONS:
     assert active.sum() > 0.4 * active.size, f'{reg}: too few active pixels'
     assert err.max() < 1e-12, reg
 
+# --------------------------------------------------------------------------- #
+# per-pixel instrumental profiles: STiC indexes psf(yy, xx, :) with the
+# run's own pixel coordinates, so the tile must carry the SLICED profiles
+# --------------------------------------------------------------------------- #
+n_checked = 0
+for r in tiles.parse_regions(_cfg):
+    src_inst = os.path.join(SRC, r['inst_file'])
+    if not os.path.isfile(src_inst):
+        continue
+    dst_inst = os.path.join(OUT, os.path.basename(r['inst_file']))
+    assert os.path.isfile(dst_inst) and not os.path.islink(dst_inst), dst_inst
+    with Dataset(src_inst) as f:
+        full = np.ma.filled(f.variables['iprof'][:], np.nan)
+    with Dataset(dst_inst) as f:
+        tile = np.ma.filled(f.variables['iprof'][:], np.nan)
+    if full.ndim >= 2:
+        want = full[MY0:MY0 + TNY, MX0:MX0 + TNX]
+        assert tile.shape == want.shape, (dst_inst, tile.shape, want.shape)
+        assert np.array_equal(tile, want, equal_nan=True), dst_inst
+        # a symlinked/unsliced file would have served (0:TNY, 0:TNX)
+        wrong = full[:TNY, :TNX]
+        print(f'{os.path.basename(dst_inst)}: per-pixel iprof sliced '
+              f'{full.shape} -> {tile.shape}; max |tile-local mix-up| '
+              f'would have been {np.nanmax(np.abs(wrong - want)):.3e}')
+    else:
+        assert np.array_equal(tile, full, equal_nan=True), dst_inst
+        print(f'{os.path.basename(dst_inst)}: 1-D iprof copied')
+    n_checked += 1
+print(f'instrumental profiles checked: {n_checked}')
+
+# --------------------------------------------------------------------------- #
+# inversion_mask on the model grid is sliced too (temporary launch dir)
+# --------------------------------------------------------------------------- #
+LD = os.path.join(HERE, '.test_scratch', 'mask_launch')
+shutil.rmtree(LD, ignore_errors=True)
+os.makedirs(LD)
+for e in os.listdir(SRC):
+    if e != 'input.cfg':
+        os.symlink(os.path.abspath(os.path.join(SRC, e)), os.path.join(LD, e))
+mask_full = (np.arange(MODEL_NY * MODEL_NX) % 7).reshape(MODEL_NY, MODEL_NX)
+with Dataset(os.path.join(LD, 'mask_test.nc'), 'w') as f:
+    f.createDimension('nx', MODEL_NX)
+    f.createDimension('ny', MODEL_NY)
+    f.createVariable('mask', 'i4', ('ny', 'nx'))[:] = mask_full
+with open(os.path.join(LD, 'input.cfg'), 'w') as f:
+    f.write(_cfg + '\ninversion_mask = mask_test.nc\n')
+OUTM = os.path.join(HERE, '.test_scratch', 'tile_mask')
+shutil.rmtree(OUTM, ignore_errors=True)
+tiles.extract_tile_rundir(LD, OUTM, MX0, MY0, TNX, TNY, require_aux=False)
+with Dataset(os.path.join(OUTM, 'mask_test.nc')) as f:
+    mt = f.variables['mask'][:]
+assert np.array_equal(mt, mask_full[MY0:MY0 + TNY, MX0:MX0 + TNX])
+with open(os.path.join(OUTM, 'input.cfg')) as f:
+    assert tiles.read_cfg_key(f.read(), 'inversion_mask') == 'mask_test.nc'
+print('inversion_mask: sliced and cfg rewritten')
+
 print('\nALL TILE TESTS PASSED')
