@@ -136,6 +136,7 @@ def select_tiles(src_dirs, tile, apron, n_tiles, n_clusters=8,
 def prepare_runs(selection, out_root, tile, cfg_overrides=None,
                  aux_search=()):
     """Extract one run dir per selected tile under out_root/tile_NNNN."""
+    out_root = os.path.abspath(out_root)   # index.json must not depend on cwd
     os.makedirs(out_root, exist_ok=True)
     overrides = dict(cfg_overrides or {})
     overrides.setdefault('output_atmos', 'atmosout_tile.nc')
@@ -201,12 +202,33 @@ cd {os.path.abspath(out_root)}/tile_$(printf '%04d' $SLURM_ARRAY_TASK_ID)
 # harvesting
 # --------------------------------------------------------------------------- #
 
+def region_tag(obs_file):
+    """Region tag used as key in label records / channel stats: the obs
+    basename without extension, so records from flat tile run dirs and
+    from launch-dir-style cfgs (subdirectory-prefixed paths) agree."""
+    return os.path.splitext(os.path.basename(obs_file))[0]
+
+
+def out_obs_path(run_dir, obs_file):
+    """Locate STiC's degraded-synthetic output for a region (named
+    out_<obs> by STiC). With a subdirectory-prefixed obs entry the file
+    may sit next to the obs file or under the launch dir."""
+    d, b = os.path.split(obs_file)
+    cands = [os.path.join(run_dir, 'out_' + obs_file),
+             os.path.join(run_dir, d, 'out_' + b),
+             os.path.join(run_dir, 'out_' + b)]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
 def _region_chi2_map(run_dir, reg_file):
     """Per-observed-pixel reduced chi2 of one region from STiC's
     degraded output (out_<reg>.nc). Returns (chi2_map, act_mask)."""
     from netCDF4 import Dataset
     tob = tiles.CoupledObs(os.path.join(run_dir, reg_file))
-    with Dataset(os.path.join(run_dir, 'out_' + reg_file)) as f:
+    with Dataset(out_obs_path(run_dir, reg_file)) as f:
         syn = np.ma.filled(f.variables['profiles'][0], np.nan)
     act = tob.pweights[0] > 0
     use = tob.weights < 1e10                       # (nw, ns)
@@ -252,7 +274,7 @@ def harvest(out_root, apron, atmos_name='atmosout_tile.nc'):
         chi2s = {}
         for reg in regions:
             tob = tiles.CoupledObs(os.path.join(rd, reg['obs_file']))
-            tag = os.path.splitext(reg['obs_file'])[0]
+            tag = region_tag(reg['obs_file'])
             rec_out[f'{tag}_dat'] = tob.dat[0].astype('float32')
             rec_out[f'{tag}_pweights'] = tob.pweights[0].astype('float32')
             rec_out[f'{tag}_wav'] = tob.wav
@@ -260,7 +282,7 @@ def harvest(out_root, apron, atmos_name='atmosout_tile.nc'):
             rec_out[f'{tag}_lts'] = tob.lts
             rec_out[f'{tag}_ltargs'] = tob.ltargs
             rec_out[f'{tag}_ds'] = tob.ds.astype('float32')
-            if os.path.isfile(os.path.join(rd, 'out_' + reg['obs_file'])):
+            if out_obs_path(rd, reg['obs_file']):
                 c2, _ = _region_chi2(rd, reg['obs_file'])
                 chi2s[tag] = c2
                 rec_out[f'{tag}_chi2'] = c2
@@ -288,8 +310,7 @@ def _fine_pixel_chi2(run_dir, regions, ny, nx):
     (first-order warp inverse w ~ k - ds(k))."""
     total = np.zeros((ny, nx))
     for reg in regions:
-        fobs = os.path.join(run_dir, 'out_' + reg['obs_file'])
-        if not os.path.isfile(fobs):
+        if out_obs_path(run_dir, reg['obs_file']) is None:
             continue
         cmap, act = _region_chi2_map(run_dir, reg['obs_file'])
         cmap = np.where(act, cmap, 0.0)   # masked obs pixels: no constraint
@@ -337,7 +358,7 @@ def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None):
 
     for reg in regions:
         tob = tiles.CoupledObs(os.path.join(run_dir, reg['obs_file']))
-        tag = os.path.splitext(reg['obs_file'])[0]
+        tag = region_tag(reg['obs_file'])
         rec_out[f'{tag}_dat'] = tob.dat[0].astype('float32')
         rec_out[f'{tag}_pweights'] = tob.pweights[0].astype('float32')
         rec_out[f'{tag}_wav'] = tob.wav
@@ -345,7 +366,7 @@ def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None):
         rec_out[f'{tag}_lts'] = tob.lts
         rec_out[f'{tag}_ltargs'] = tob.ltargs
         rec_out[f'{tag}_ds'] = tob.ds.astype('float32')
-        if os.path.isfile(os.path.join(run_dir, 'out_' + reg['obs_file'])):
+        if out_obs_path(run_dir, reg['obs_file']):
             c2, _ = _region_chi2(run_dir, reg['obs_file'])
             rec_out[f'{tag}_chi2'] = c2
 

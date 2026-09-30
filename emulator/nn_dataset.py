@@ -195,7 +195,7 @@ def rundir_to_sample(run_dir, stats):
     regions = {}
     for reg in regs:
         o = tiles.CoupledObs(os.path.join(run_dir, reg['obs_file']))
-        tag = os.path.splitext(reg['obs_file'])[0]
+        tag = os.path.splitext(os.path.basename(reg['obs_file']))[0]
         w, s = _used_channels(o.weights)
         img = np.moveaxis(o.dat[0][:, :, w, s], -1, 0).astype('float32')
         mu, sd = stats[tag]
