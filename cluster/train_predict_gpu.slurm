@@ -1,7 +1,9 @@
 #!/bin/bash
-# Train the ensemble (one member per GPU) and predict the full map.
+# Train the ensemble and predict the full map (generic template).
+# Members are spread over the allocated GPUs (1 GPU: one after another).
 # Edit the lines marked EDIT, then from the repo root on the GPU cluster:
 #   sbatch cluster/train_predict_gpu.slurm
+# Site version for the UniBE GPU cluster: train_predict_gpu_unibe.slurm
 #SBATCH --job-name=stic_emul_train
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1                  # 1 GPU: the 4 networks train one after
