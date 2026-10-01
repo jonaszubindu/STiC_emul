@@ -116,14 +116,20 @@ def record_to_sample(rec, stats=None, with_targets=True):
         Y, names = encode_targets_arrays(np.asarray(rec['ltau'], 'float64'),
                                          arrs)
         # per-pixel chi2 filter (full-map records from harvest_rundir)
-        if 'pixel_chi2' in rec.files and C.PIXEL_CHI2_MAX is not None:
+        if 'pixel_chi2' in rec.files and (C.PIXEL_CHI2_MAX is not None
+                                          or C.PIXEL_CHI2_QUANTILE is not None):
             pc = np.ravel(rec['pixel_chi2'])
-            good = (pc <= C.PIXEL_CHI2_MAX) & np.isfinite(Y).all(axis=1)
+            if C.PIXEL_CHI2_MAX is not None:
+                thr, how = C.PIXEL_CHI2_MAX, 'PIXEL_CHI2_MAX'
+            else:
+                thr = float(np.nanquantile(pc, C.PIXEL_CHI2_QUANTILE))
+                how = f'PIXEL_CHI2_QUANTILE={C.PIXEL_CHI2_QUANTILE}'
+            good = (pc <= thr) & np.isfinite(Y).all(axis=1)
             coords, Y = coords[good], Y[good]
             q = np.nanpercentile(pc, [10, 50, 90])
-            print(f'record_to_sample: pixel chi2 filter (<= '
-                  f'{C.PIXEL_CHI2_MAX}) kept {good.sum()}/{good.size} label '
-                  f'pixels; pixel chi2 p10/p50/p90 = '
+            print(f'record_to_sample: pixel chi2 filter (<= {thr:.4g}, '
+                  f'{how}) kept {good.sum()}/{good.size} label pixels; '
+                  f'pixel chi2 p10/p50/p90 = '
                   f'{q[0]:.3g}/{q[1]:.3g}/{q[2]:.3g}')
         out['coords'] = coords
         out['Y_raw'] = Y
@@ -190,8 +196,9 @@ def build_dataset(label_dirs, chi2_max=None):
     if not raw:
         raise ValueError(
             'no label pixels left: the pixel chi2 filter removed all of '
-            'them. Set emu_config.PIXEL_CHI2_MAX from the p10/p50/p90 '
-            'printed above (e.g. near p50 for a first round).')
+            'them. Use the relative filter (emu_config.PIXEL_CHI2_MAX = '
+            'None, PIXEL_CHI2_QUANTILE e.g. 0.5) or set PIXEL_CHI2_MAX '
+            'from the p10/p50/p90 printed above.')
     Yall = np.vstack([s['Y_raw'] for s in raw])
     ym, ys = Yall.mean(0), Yall.std(0)
     ys[ys < 1e-12] = 1.0

@@ -335,8 +335,8 @@ def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None):
 
     Works on any run whose output atmosphere + degraded synthetics
     (out_obs_*.nc) exist — including a partially converged inversion:
-    the record carries a per-fine-pixel chi2 map, and training filters
-    pixels by PIXEL_CHI2_MAX, so only well-fitted pixels become labels.
+    the record carries a per-fine-pixel chi2 map, and training keeps only
+    the best-fitted pixels (emu_config PIXEL_CHI2_QUANTILE / _MAX).
     """
     from . import stic_io
     with open(os.path.join(run_dir, 'input.cfg')) as f:

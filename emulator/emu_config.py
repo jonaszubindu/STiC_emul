@@ -24,10 +24,15 @@ VAL_FRACTION = 0.1         # fraction of tiles held out
 PATIENCE_STEPS = 3000
 DEPTH_SMOOTH_LAMBDA = 1e-3
 CHI2_MAX = None            # drop label tiles with any region chi2 above this
-# Per-PIXEL label filter for full-map records (harvest_rundir): pixels
-# whose combined chi2 exceeds this never become training labels. This is
-# what makes a PARTIALLY converged map usable as a label source.
-PIXEL_CHI2_MAX = 3.0
+# Per-PIXEL label filter for full-map records (harvest_rundir); this is
+# what makes a PARTIALLY converged map usable as a label source. The
+# pixel chi2 is in STiC's own units (mean of ((obs-syn)/weights)^2, worst
+# region), but STiC weights are often relative rather than true noise, so
+# typical values can be >> 1. Hence the default is RELATIVE: keep the
+# best PIXEL_CHI2_QUANTILE fraction of each map. Setting PIXEL_CHI2_MAX
+# (absolute) overrides the quantile.
+PIXEL_CHI2_QUANTILE = 0.5
+PIXEL_CHI2_MAX = None
 MAX_PIX_PER_TILE = 2048    # decoder pixels per record per training step
 DEVICE = 'auto'            # 'auto' (cuda > mps > cpu) | 'cuda' | 'mps' | 'cpu'
 SEED = 1234
