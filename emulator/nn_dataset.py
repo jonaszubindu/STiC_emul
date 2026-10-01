@@ -135,7 +135,10 @@ def record_to_sample(rec, stats=None, with_targets=True):
 def load_records(label_dirs, chi2_max=None):
     files = []
     for d in label_dirs:
-        files += sorted(glob.glob(os.path.join(d, 'tile_*.npz')))
+        found = sorted(glob.glob(os.path.join(d, '*.npz')))
+        if not found:
+            raise FileNotFoundError(f'no label records (*.npz) in {d}')
+        files += found
     recs = []
     for f in files:
         z = np.load(f, allow_pickle=False)
