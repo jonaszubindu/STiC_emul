@@ -49,8 +49,21 @@ if [ ${#LABELS[@]} -eq 0 ]; then
 fi
 echo "training on: ${LABELS[*]}"
 
-mkdir -p "$ROUND/ckpts"
-bash cluster/train_members.sh "${LABELS[@]}" "$ROUND/ckpts"
+# one output set per job, so a retraining never mixes with an earlier one
+RUN_ID=${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}
+CKPT="$ROUND/ckpts_$RUN_ID"
+PRED="$ROUND/pred_$RUN_ID"
+CMP="$ROUND/compare_$RUN_ID"
 
-python -m emulator.predict_map "$LAUNCH" --ckpt "$ROUND/ckpts" \
-    --out "$ROUND/pred"
+bash cluster/train_members.sh "${LABELS[@]}" "$CKPT"
+
+python -m emulator.predict_map "$LAUNCH" --ckpt "$CKPT" --out "$PRED"
+
+# compare with the inversion if full-map labels exist
+if [ -f "$ROUND/labels_map/full_map.npz" ]; then
+    python -m emulator.compare_maps --labels "$ROUND/labels_map/full_map.npz" \
+        --pred "$PRED" --ckpt "$CKPT" --out "$CMP"
+fi
+echo "checkpoints: $CKPT"
+echo "prediction:  $PRED"
+echo "comparison:  $CMP"

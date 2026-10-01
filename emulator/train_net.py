@@ -142,6 +142,21 @@ def train_ensemble(label_dirs, out_dir, steps=None, n_ensemble=None,
     # clobber it (e.g. a different --members setting)
     meta_path = os.path.join(out_dir, 'meta.json')
     write_shared = member is None or not os.path.isfile(meta_path)
+    if not write_shared:
+        # another member already wrote the shared files: they must describe
+        # THIS training setup, or prediction would decode with the wrong
+        # normalization (e.g. retraining into an old checkpoint dir)
+        with open(meta_path) as f:
+            old = json.load(f)
+        mine = dict(n_out=meta['n_out'],
+                    chi2_threshold=meta['chi2_threshold'],
+                    split=meta['split'], n_train_px=n_tr)
+        diff = [k for k, v in mine.items() if old.get(k) != v]
+        if diff:
+            raise ValueError(
+                f'{out_dir} already holds an ensemble trained with a '
+                f'different setup ({", ".join(diff)} differ). Use a new '
+                f'--out directory.')
     if write_shared:
         np.savez(os.path.join(out_dir, 'encoding.npz'),
                  y_mean=meta['y_mean'], y_std=meta['y_std'],
