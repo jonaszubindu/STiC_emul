@@ -228,7 +228,15 @@ def _region_chi2_map(run_dir, reg_file):
     degraded output (out_<reg>.nc). Returns (chi2_map, act_mask)."""
     from netCDF4 import Dataset
     tob = tiles.CoupledObs(os.path.join(run_dir, reg_file))
-    with Dataset(out_obs_path(run_dir, reg_file)) as f:
+    path = out_obs_path(run_dir, reg_file)
+    with Dataset(path) as f:
+        if f.variables['profiles'].shape[0] == 0:
+            raise RuntimeError(
+                f'{path} holds no synthetic profiles yet. Coupled STiC '
+                'recreates its out_ files empty when an inversion starts and '
+                'fills them only at the end: is an inversion running in '
+                f'{run_dir}? Harvest a directory whose output atmosphere, '
+                'out_ files and input.cfg all come from the same finished run.')
         syn = np.ma.filled(f.variables['profiles'][0], np.nan)
     act = tob.pweights[0] > 0
     use = tob.weights < 1e10                       # (nw, ns)
