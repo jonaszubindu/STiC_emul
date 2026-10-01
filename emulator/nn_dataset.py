@@ -117,11 +117,14 @@ def record_to_sample(rec, stats=None, with_targets=True):
                                          arrs)
         # per-pixel chi2 filter (full-map records from harvest_rundir)
         if 'pixel_chi2' in rec.files and C.PIXEL_CHI2_MAX is not None:
-            good = np.ravel(rec['pixel_chi2']) <= C.PIXEL_CHI2_MAX
-            good &= np.isfinite(Y).all(axis=1)
+            pc = np.ravel(rec['pixel_chi2'])
+            good = (pc <= C.PIXEL_CHI2_MAX) & np.isfinite(Y).all(axis=1)
             coords, Y = coords[good], Y[good]
-            print(f'record_to_sample: pixel chi2 filter kept '
-                  f'{good.sum()}/{good.size} label pixels')
+            q = np.nanpercentile(pc, [10, 50, 90])
+            print(f'record_to_sample: pixel chi2 filter (<= '
+                  f'{C.PIXEL_CHI2_MAX}) kept {good.sum()}/{good.size} label '
+                  f'pixels; pixel chi2 p10/p50/p90 = '
+                  f'{q[0]:.3g}/{q[1]:.3g}/{q[2]:.3g}')
         out['coords'] = coords
         out['Y_raw'] = Y
         out['target_names'] = names
@@ -177,6 +180,18 @@ def build_dataset(label_dirs, chi2_max=None):
     recs = load_records(label_dirs, chi2_max)
     stats = channel_stats(recs)
     raw = [record_to_sample(z, stats=stats) for z in recs]
+    # a record whose pixels were all filtered out would give NaN losses
+    # (mean over an empty batch) and silently untrained networks
+    empty = [i for i, s in enumerate(raw) if len(s['coords']) == 0]
+    if empty:
+        print(f'build_dataset: dropping {len(empty)} record(s) with no '
+              f'label pixels left after the chi2 filter')
+    raw = [s for s in raw if len(s['coords']) > 0]
+    if not raw:
+        raise ValueError(
+            'no label pixels left: the pixel chi2 filter removed all of '
+            'them. Set emu_config.PIXEL_CHI2_MAX from the p10/p50/p90 '
+            'printed above (e.g. near p50 for a first round).')
     Yall = np.vstack([s['Y_raw'] for s in raw])
     ym, ys = Yall.mean(0), Yall.std(0)
     ys[ys < 1e-12] = 1.0

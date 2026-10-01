@@ -4,9 +4,12 @@
 #   sbatch cluster/train_predict_gpu.slurm
 #SBATCH --job-name=stic_emul_train
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4                  # EDIT if your cluster wants e.g. --gpus=4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
+#SBATCH --gres=gpu:1                  # 1 GPU: the 4 networks train one after
+                                      # another; gpu:4 trains them in parallel.
+                                      # EDIT if your cluster wants e.g. --gpus=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem-per-cpu=5760M           # ~23 GB RAM; one training process
+                                      # needs ~3-4 GB
 #SBATCH --time=08:00:00
 #SBATCH --partition=EDIT_GPU_PARTITION
 #SBATCH --output=stic_emul_train_%j.log
@@ -18,6 +21,9 @@ source ~/.bashrc
 conda activate EDIT_ENV_NAME
 
 set -u
+
+# the work is on the GPU; keep CPU threads from oversubscribing
+export OMP_NUM_THREADS=1
 
 REPO=/storage/homefs/jz22g912/STiC_emul
 LAUNCH=/storage/homefs/jz22g912/coupled_stic          # dir with input.cfg
