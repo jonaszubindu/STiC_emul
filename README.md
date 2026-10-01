@@ -16,6 +16,15 @@ pip install -e .          # inversion/harvest side (CPU cluster, laptop)
 pip install -e '.[train]' # training side (GPU cluster)
 ```
 
+**GPU setup:** the PyTorch build must support the GPU (H100 = sm_90 needs
+a CUDA 12 build, e.g. `pip install torch --index-url
+https://download.pytorch.org/whl/cu124`, chosen to match the driver's
+`CUDA Version` in `nvidia-smi`). An old `pip install --user` PyTorch in
+`~/.local` takes precedence over the conda env's; set
+`export PYTHONNOUSERSITE=1` when installing and in job scripts.
+`train_net` prints which torch it loaded and stops with a clear error if
+that build cannot run on the GPU.
+
 ## Pipeline
 
 ```python

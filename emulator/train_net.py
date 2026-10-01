@@ -27,6 +27,21 @@ def _device():
         want = 'cpu'
     if want == 'mps' and not torch.backends.mps.is_available():
         want = 'cpu'
+    print(f'torch {torch.__version__} (cuda {torch.version.cuda}) '
+          f'from {torch.__file__}')
+    if want == 'cuda':
+        # torch only WARNS when it lacks kernels for the GPU and then
+        # crashes at the first kernel; run one to fail early and clearly
+        try:
+            (torch.ones(8, device='cuda') * 2).sum().item()
+        except RuntimeError as e:
+            raise RuntimeError(
+                f'this PyTorch build cannot run on '
+                f'{torch.cuda.get_device_name()} (capability '
+                f'{torch.cuda.get_device_capability()}; build supports '
+                f'{torch.cuda.get_arch_list()}). Install a PyTorch build '
+                f'for this GPU into the active env, and set '
+                f'PYTHONNOUSERSITE=1 if ~/.local shadows it.') from e
     return torch.device(want)
 
 

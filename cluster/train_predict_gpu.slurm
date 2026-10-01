@@ -19,6 +19,9 @@ set -eo pipefail
 # EDIT: activate the environment where you ran  pip install -e '.[train]'
 source ~/.bashrc
 conda activate EDIT_ENV_NAME
+# ignore packages in ~/.local (an old pip --user torch there shadows the
+# env's torch)
+export PYTHONNOUSERSITE=1
 
 set -u
 
