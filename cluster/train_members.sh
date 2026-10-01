@@ -33,7 +33,7 @@ for i in $(seq 0 $((NG - 1))); do
     (
         for ((k = i; k < NMEM; k += NG)); do
             echo "member $k -> GPU ${GPUS[$i]}"
-            CUDA_VISIBLE_DEVICES=${GPUS[$i]} python -m emulator.train_net \
+            CUDA_VISIBLE_DEVICES=${GPUS[$i]} python -u -m emulator.train_net \
                 "${LABELS[@]}" --out "$CKPT" --member "$k" --members "$NMEM" \
                 ${EXTRA[@]+"${EXTRA[@]}"} > "$CKPT/train_member_$k.log" 2>&1
         done

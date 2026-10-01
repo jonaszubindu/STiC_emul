@@ -24,6 +24,8 @@ set -u
 
 # the work is on the GPU; keep CPU threads from oversubscribing
 export OMP_NUM_THREADS=1
+# write log lines immediately instead of in buffered chunks
+export PYTHONUNBUFFERED=1
 
 REPO=/storage/homefs/jz22g912/STiC_emul
 LAUNCH=/storage/homefs/jz22g912/coupled_stic          # dir with input.cfg
