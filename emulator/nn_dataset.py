@@ -18,6 +18,7 @@ continuous position in each region's image (see net.region_grid_coords).
 import os
 import glob
 import json
+import hashlib
 import numpy as np
 
 from . import tiles
@@ -84,8 +85,55 @@ def _used_channels(weights):
     return w, s
 
 
-def record_to_sample(rec, stats=None, with_targets=True):
-    """One harvested npz record -> sample dict (see module docstring)."""
+def split_codes(src, coords, frac=None, block=None, guard=None, seed=None):
+    """Spatial train/validation split of label pixels.
+
+    Returns int8 codes per pixel: 0 train, 1 held out (validation),
+    2 guard (training pixel next to a held-out block; used for neither).
+    The held-out blocks are a deterministic function of (FOV, block
+    index, seed) — SHA-256, not Python's per-process salted hash() (and
+    not crc32, whose values cluster for such similar keys) — so all
+    records of a FOV, all ensemble members and later evaluation scripts
+    see the same split.
+    """
+    frac = C.VAL_FRACTION if frac is None else frac
+    block = C.VAL_BLOCK if block is None else block
+    guard = C.VAL_GUARD if guard is None else guard
+    seed = C.VAL_SEED if seed is None else seed
+    n = len(coords)
+    if not frac or n == 0:
+        return np.zeros(n, 'int8')
+    y = np.asarray(coords[:, 0]).astype(int)
+    x = np.asarray(coords[:, 1]).astype(int)
+    cache = {}
+
+    def held_out(by, bx):
+        out = np.empty(by.size, bool)
+        for i, key in enumerate(zip(by.tolist(), bx.tolist())):
+            if key not in cache:
+                h = hashlib.sha256(
+                    f'{src}|{seed}|{key[0]}|{key[1]}'.encode()).digest()
+                cache[key] = int.from_bytes(h[:8], 'big') / 2.0 ** 64 < frac
+            out[i] = cache[key]
+        return out
+
+    val = held_out(y // block, x // block)
+    near = np.zeros(n, bool)
+    if guard > 0:
+        # guard < block: the square of half-width `guard` around a pixel
+        # touches at most the blocks of its four corners
+        for dy in (-guard, guard):
+            for dx in (-guard, guard):
+                near |= held_out((y + dy) // block, (x + dx) // block)
+    return np.where(val, 1, np.where(near, 2, 0)).astype('int8')
+
+
+def record_to_sample(rec, stats=None, with_targets=True, chi2_thr=None):
+    """One harvested npz record -> sample dict (see module docstring).
+
+    chi2_thr: drop label pixels whose pixel_chi2 exceeds it (records
+    without pixel_chi2 are not filtered).
+    """
     tags = sorted({k.rsplit('_', 1)[0] for k in rec.files
                    if k.endswith('_dat')})
     m0x, m0y = int(rec['mx0']), int(rec['my0'])
@@ -115,26 +163,35 @@ def record_to_sample(rec, stats=None, with_targets=True):
         arrs = {v: np.asarray(rec[v], 'float64') for v in C.TARGET_VARS}
         Y, names = encode_targets_arrays(np.asarray(rec['ltau'], 'float64'),
                                          arrs)
-        # per-pixel chi2 filter (full-map records from harvest_rundir)
-        if 'pixel_chi2' in rec.files and (C.PIXEL_CHI2_MAX is not None
-                                          or C.PIXEL_CHI2_QUANTILE is not None):
-            pc = np.ravel(rec['pixel_chi2'])
-            if C.PIXEL_CHI2_MAX is not None:
-                thr, how = C.PIXEL_CHI2_MAX, 'PIXEL_CHI2_MAX'
-            else:
-                thr = float(np.nanquantile(pc, C.PIXEL_CHI2_QUANTILE))
-                how = f'PIXEL_CHI2_QUANTILE={C.PIXEL_CHI2_QUANTILE}'
-            good = (pc <= thr) & np.isfinite(Y).all(axis=1)
-            coords, Y = coords[good], Y[good]
-            q = np.nanpercentile(pc, [10, 50, 90])
-            print(f'record_to_sample: pixel chi2 filter (<= {thr:.4g}, '
-                  f'{how}) kept {good.sum()}/{good.size} label pixels; '
-                  f'pixel chi2 p10/p50/p90 = '
-                  f'{q[0]:.3g}/{q[1]:.3g}/{q[2]:.3g}')
+        good = np.isfinite(Y).all(axis=1)
+        if 'pixel_chi2' in rec.files and chi2_thr is not None:
+            good &= np.ravel(rec['pixel_chi2']) <= chi2_thr
+        coords, Y = coords[good], Y[good]
+        out['n_label_px'] = int(good.size)
         out['coords'] = coords
         out['Y_raw'] = Y
         out['target_names'] = names
+        out['src'] = os.path.normpath(str(rec['src']))
     return out
+
+
+def chi2_threshold(recs):
+    """Global pixel-chi2 threshold over all records that carry pixel_chi2
+    (full-map and tile records alike). Returns (threshold or None, how)."""
+    if C.PIXEL_CHI2_MAX is not None:
+        return float(C.PIXEL_CHI2_MAX), 'PIXEL_CHI2_MAX'
+    if C.PIXEL_CHI2_QUANTILE is None:
+        return None, 'off'
+    pcs = [np.ravel(z['pixel_chi2']) for z in recs if 'pixel_chi2' in z.files]
+    if not pcs:
+        return None, 'no pixel_chi2 in records'
+    pc = np.concatenate(pcs)
+    pc = pc[np.isfinite(pc)]
+    q = np.percentile(pc, [10, 50, 90])
+    print(f'chi2_threshold: pixel chi2 over {pc.size} label pixels '
+          f'p10/p50/p90 = {q[0]:.3g}/{q[1]:.3g}/{q[2]:.3g}')
+    return (float(np.quantile(pc, C.PIXEL_CHI2_QUANTILE)),
+            f'PIXEL_CHI2_QUANTILE={C.PIXEL_CHI2_QUANTILE}')
 
 
 # --------------------------------------------------------------------------- #
@@ -185,7 +242,13 @@ def build_dataset(label_dirs, chi2_max=None):
     targets, plus everything needed to reproduce the encoding."""
     recs = load_records(label_dirs, chi2_max)
     stats = channel_stats(recs)
-    raw = [record_to_sample(z, stats=stats) for z in recs]
+    thr, how = chi2_threshold(recs)
+    raw = [record_to_sample(z, stats=stats, chi2_thr=thr) for z in recs]
+    n_all = sum(s['n_label_px'] for s in raw)
+    n_kept = sum(len(s['coords']) for s in raw)
+    thr_txt = 'none' if thr is None else f'{thr:.4g}'
+    print(f'build_dataset: pixel chi2 filter (<= {thr_txt}, {how}) kept '
+          f'{n_kept}/{n_all} label pixels in {len(raw)} records')
     # a record whose pixels were all filtered out would give NaN losses
     # (mean over an empty batch) and silently untrained networks
     empty = [i for i, s in enumerate(raw) if len(s['coords']) == 0]
@@ -199,17 +262,25 @@ def build_dataset(label_dirs, chi2_max=None):
             'them. Use the relative filter (emu_config.PIXEL_CHI2_MAX = '
             'None, PIXEL_CHI2_QUANTILE e.g. 0.5) or set PIXEL_CHI2_MAX '
             'from the p10/p50/p90 printed above.')
-    Yall = np.vstack([s['Y_raw'] for s in raw])
-    ym, ys = Yall.mean(0), Yall.std(0)
+    for s in raw:
+        s['split'] = split_codes(s['src'], s['coords'])
+    # target standardization from TRAINING pixels only
+    Ytr = np.vstack([s['Y_raw'][s['split'] == 0] for s in raw])
+    if len(Ytr) == 0:
+        Ytr = np.vstack([s['Y_raw'] for s in raw])
+    ym, ys = Ytr.mean(0), Ytr.std(0)
     ys[ys < 1e-12] = 1.0
     for s in raw:
         s['Y'] = ((s['Y_raw'] - ym) / ys).astype('float32')
         del s['Y_raw']
     meta = dict(stats=stats, y_mean=ym, y_std=ys,
                 target_names=raw[0]['target_names'],
-                n_out=Yall.shape[1],
+                n_out=Ytr.shape[1],
                 enc_channels={t: raw[0]['regions'][t]['img'].shape[0]
-                              for t in raw[0]['regions']})
+                              for t in raw[0]['regions']},
+                chi2_threshold=thr, chi2_how=how,
+                split=dict(frac=C.VAL_FRACTION, block=C.VAL_BLOCK,
+                           guard=C.VAL_GUARD, seed=C.VAL_SEED))
     return raw, meta
 
 

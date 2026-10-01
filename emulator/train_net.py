@@ -45,6 +45,15 @@ def _device():
     return torch.device(want)
 
 
+def _subset(s, mask):
+    """View of a sample restricted to some of its label pixels (the
+    region images are shared, not copied)."""
+    d = {k: v for k, v in s.items() if k not in ('coords', 'Y', 'split')}
+    d['coords'] = s['coords'][mask]
+    d['Y'] = s['Y'][mask]
+    return d
+
+
 def train_member(k, samples_t, samples_v, meta, out_dir, device,
                  steps=None):
     torch.manual_seed(C.SEED + 1000 * k)
@@ -93,7 +102,7 @@ def train_member(k, samples_t, samples_v, meta, out_dir, device,
         opt.step()
         sched.step()
         if (it + 1) % 200 == 0 or it == steps - 1:
-            vl = val_loss() if samples_v else float(loss) * C.TILES_PER_STEP
+            vl = val_loss() if samples_v else loss.item() * C.TILES_PER_STEP
             if vl < best:
                 best, best_step = vl, it
                 torch.save(model.state_dict(), ckpt)
@@ -112,13 +121,22 @@ def train_ensemble(label_dirs, out_dir, steps=None, n_ensemble=None,
     device = _device()
     print('device:', device)
     samples, meta = nd.build_dataset(label_dirs, chi2_max=C.CHI2_MAX)
-    rng = np.random.default_rng(C.SEED)
-    perm = rng.permutation(len(samples))
-    nval = max(1, int(C.VAL_FRACTION * len(samples))) \
-        if len(samples) > 3 else 0
-    val = [samples[i] for i in perm[:nval]]
-    trn = [samples[i] for i in perm[nval:]]
-    print(f'train_ensemble: {len(trn)} train / {len(val)} val tiles')
+    trn, val = [], []
+    for s in samples:
+        for code, lst in ((0, trn), (1, val)):
+            m = s['split'] == code
+            if m.any():
+                lst.append(_subset(s, m))
+    n_tr = sum(len(s['coords']) for s in trn)
+    n_va = sum(len(s['coords']) for s in val)
+    n_gu = sum(int((s['split'] == 2).sum()) for s in samples)
+    print(f'train_ensemble: label pixels  train {n_tr}  held-out {n_va}  '
+          f'guard (unused) {n_gu}  from {len(samples)} record(s)')
+    if not trn:
+        raise ValueError('no training pixels left after the spatial split')
+    if not val:
+        print('train_ensemble: WARNING no held-out pixels; early stopping '
+              'falls back to the training loss')
 
     # shared metadata: written once; parallel --member jobs must not
     # clobber it (e.g. a different --members setting)
@@ -138,7 +156,11 @@ def train_ensemble(label_dirs, out_dir, steps=None, n_ensemble=None,
                            n_out=meta['n_out'],
                            c_feat=C.ENC_CHANNELS, enc_layers=C.ENC_LAYERS,
                            dec_hidden=list(C.DEC_HIDDEN), dropout=C.DROPOUT,
-                           n_ensemble=n_ensemble or C.N_ENSEMBLE),
+                           n_ensemble=n_ensemble or C.N_ENSEMBLE,
+                           chi2_threshold=meta['chi2_threshold'],
+                           chi2_how=meta['chi2_how'],
+                           split=meta['split'],
+                           n_train_px=n_tr, n_val_px=n_va, n_guard_px=n_gu),
                       f, indent=1)
 
     t0 = time.time()

@@ -286,6 +286,15 @@ def harvest(out_root, apron, atmos_name='atmosout_tile.nc'):
                 c2, _ = _region_chi2(rd, reg['obs_file'])
                 chi2s[tag] = c2
                 rec_out[f'{tag}_chi2'] = c2
+        if chi2s:
+            # per-fine-pixel chi2 (worst region), so tile labels pass
+            # through the same pixel filter as full-map labels
+            tny, tnx = model.ny + 2 * apron, model.nx + 2 * apron
+            rec_out['pixel_chi2'] = _fine_pixel_chi2(
+                rd, regions, tny, tnx)[apron:tny - apron, apron:tnx - apron]
+        else:
+            print(f'harvest: WARNING no out_<obs>.nc in {rd}; this tile '
+                  f'gets no pixel chi2 and is not chi2-filtered')
         np.savez_compressed(os.path.join(lab_dir, f'tile_{i:04d}.npz'),
                             **rec_out)
         summary.append((i, chi2s))
@@ -318,16 +327,24 @@ def _fine_pixel_chi2(run_dir, regions, ny, nx):
         if int(o.lts[0]) < 0:
             total = np.maximum(total, cmap)
         else:
-            a = o.ltargs[:12]
-            ky, kx = np.mgrid[0:ny, 0:nx].astype('float64')
-            wx = kx - o.ds[0]
-            wy = ky - o.ds[1]
-            col = np.clip(np.round((wx + 0.5 - a[4]) / a[2]).astype(int),
-                          0, int(a[0]) - 1)
-            row = np.clip(np.round((wy + 0.5 - a[5]) / a[3]).astype(int),
-                          0, int(a[1]) - 1)
+            row, col = coarse_index(o, ny, nx)
             total = np.maximum(total, cmap[row, col])
     return total
+
+
+def coarse_index(o, ny, nx):
+    """Nearest observed pixel (row, col) of a warped coarse region for
+    each fine pixel of the run's (ny, nx) model grid. Works for full-FOV
+    and tile run dirs alike: positions come from the run's own rebin
+    geometry (input grid dx, sx = ltargs[8], [10]; output centers
+    rsx + j * rdx), with the first-order warp inverse w ~ k - ds(k)."""
+    a = o.ltargs[:12]
+    ky, kx = np.mgrid[0:ny, 0:nx].astype('float64')
+    px = (kx - o.ds[0]) * a[8] + a[10]
+    py = (ky - o.ds[1]) * a[9] + a[11]
+    col = np.clip(np.round((px - a[4]) / a[2]).astype(int), 0, int(a[0]) - 1)
+    row = np.clip(np.round((py - a[5]) / a[3]).astype(int), 0, int(a[1]) - 1)
+    return row, col
 
 
 def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None):
