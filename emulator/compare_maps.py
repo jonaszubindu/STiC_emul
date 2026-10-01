@@ -101,6 +101,7 @@ def compare(labels_file, pred_dir, ckpt_dir, out_dir, ltaus):
                            for i, c in enumerate(CATS)},
                    metrics={})
     maps = {}
+    spread_dex = {}
     for lt in ltaus:
         print(f'\n=== log tau = {lt:+.1f} ===')
         print(f'{"variable":10s} {"category":9s} {"N":>6s} {"bias":>9s} '
@@ -114,14 +115,21 @@ def compare(labels_file, pred_dir, ckpt_dir, out_dir, ltaus):
             d = pred - inv
             if v == 'azi':                     # 180-degree ambiguity
                 d = (d + 90.0) % 180.0 - 90.0
-            # epistemic std of this variable at the nearest grid depth
-            gi = int(np.argmin(np.abs(grid - lt)))
-            key = {'temp': 'log_temp'}.get(v, v)
-            chans = [i for i, n in enumerate(names) if n == key]
-            e = None
-            if chans:
-                ech = epi[sl][..., chans[gi]].reshape(npix)
-                e = ech if v == 'temp' else ech * sc   # temp: dex
+            # ensemble spread at this depth: in physical units from newer
+            # predictions (std_<var> on the output depth grid), else from
+            # the per-channel spread of older ones (temperature in dex)
+            e, e_dex = None, False
+            if f'std_{v}' in pz.files:
+                e = _at_ltau(lt_pred, pz[f'std_{v}'][sl].reshape(npix, -1)
+                             .astype('float64'), lt) * sc
+            else:
+                gi = int(np.argmin(np.abs(grid - lt)))
+                key = {'temp': 'log_temp'}.get(v, v)
+                chans = [i for i, n in enumerate(names) if n == key]
+                if chans:
+                    ech = epi[sl][..., chans[gi]].reshape(npix)
+                    e, e_dex = (ech, True) if v == 'temp' else (ech * sc, False)
+            spread_dex[v] = e_dex
             maps[(lt, v)] = (inv.reshape(shape), pred.reshape(shape),
                              d.reshape(shape),
                              None if e is None else e.reshape(shape))
@@ -140,7 +148,7 @@ def compare(labels_file, pred_dir, ckpt_dir, out_dir, ltaus):
                            else float(np.median(e[sel])))
                 summary['metrics'][f'{lt:+.1f}|{v}|{c}'] = row
                 es = '' if e is None else (
-                    f'{row["nn_std"]:.3f}dex' if v == 'temp'
+                    f'{row["nn_std"]:.3f}dex' if e_dex
                     else f'{row["nn_std"]:.3g}')
                 print(f'{lab + " [" + unit + "]":10s} {c:9s} {row["N"]:6d} '
                       f'{row["bias"]:9.3g} {row["mad"]:9.3g} '
@@ -151,7 +159,7 @@ def compare(labels_file, pred_dir, ckpt_dir, out_dir, ltaus):
     print(f'\nwrote {os.path.join(out_dir, "summary.json")}')
     _plots(maps, codes.reshape(shape), ltaus, out_dir,
            dict(z=z, m=m, sl=sl, epi=epi, names=names, grid=grid,
-                shape=shape))
+                shape=shape, pz=pz, spread_dex=spread_dex))
     return summary
 
 
@@ -178,7 +186,7 @@ def _plots(maps, cat_map, ltaus, out_dir, ctx):
               '(pip install matplotlib)')
         return
     for lt in ltaus:
-        _maps_figure(plt, maps, cat_map, lt, out_dir)
+        _maps_figure(plt, maps, cat_map, lt, out_dir, ctx['spread_dex'])
         _scatter_figure(plt, maps, cat_map, lt, out_dir)
     _profiles_figure(plt, maps, cat_map, ltaus, out_dir, ctx)
 
@@ -190,7 +198,7 @@ def _save(plt, fig, out_dir, name):
     print(f'wrote {p}')
 
 
-def _maps_figure(plt, maps, cat_map, lt, out_dir):
+def _maps_figure(plt, maps, cat_map, lt, out_dir, spread_dex):
     """Inversion | emulator | difference | ensemble spread, one row per
     quantity. Solid outline: pixels excluded by the chi2 filter; dashed
     outline: held-out validation blocks."""
@@ -227,7 +235,7 @@ def _maps_figure(plt, maps, cat_map, lt, out_dir):
         if e is not None:
             im = ax.imshow(e, origin='lower', cmap='magma')
             fig.colorbar(im, ax=ax, shrink=0.85)
-            ax.set_title('ensemble spread' + (' [dex]' if v == 'temp'
+            ax.set_title('ensemble spread' + (' [dex]' if spread_dex.get(v)
                                               else f' [{lab.split("[")[1]}'))
         else:
             ax.set_axis_off()
@@ -326,7 +334,12 @@ def _profiles_figure(plt, maps, cat_map, ltaus, out_dir, ctx):
             ax.plot(lt_pred, pr, 'r-', lw=1.2, label='emulator')
             key = 'log_temp' if v == 'temp' else v
             chans = [k for k, n in enumerate(names) if n == key]
-            if chans:
+            pz = ctx['pz']
+            if f'std_{v}' in pz.files:
+                sig = pz[f'std_{v}'][sl].reshape(npix, -1)[i] * sc
+                ax.fill_between(lt_pred, pr - sig, pr + sig, color='r',
+                                alpha=0.2, lw=0, label='ensemble spread')
+            elif chans:
                 sig = epi[sl].reshape(npix, -1)[i, chans]
                 mid = np.interp(grid, lt_pred, pr)
                 if v == 'temp':
@@ -335,7 +348,7 @@ def _profiles_figure(plt, maps, cat_map, ltaus, out_dir, ctx):
                     lo, hi = mid - sig * sc, mid + sig * sc
                 ax.fill_between(grid, lo, hi, color='r', alpha=0.2, lw=0,
                                 label='ensemble spread')
-            ax.set_xlim(grid.min(), grid.max())
+            ax.set_xlim(lt_pred.min(), lt_pred.max())
             if v == 'temp':
                 ax.set_yscale('log')
             elif min_span is not None:

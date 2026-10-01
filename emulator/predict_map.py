@@ -64,16 +64,48 @@ def nyquist_diagnostic(maps, coarse_cells):
     return out
 
 
+def _encoding_layout(enc):
+    """(names, positions per channel, output depth grid, pol_over_i) for
+    any checkpoint; older ones (fixed 16-point grid, no stored layout)
+    fall back to their LTAU_GRID and the former 55-point output grid."""
+    names = [str(s) for s in enc['target_names']]
+    grid = np.asarray(enc['ltau_grid'], 'float64')
+    if 'target_ltau' in enc.files:
+        where = np.asarray(enc['target_ltau'], 'float64')
+    else:
+        where = np.tile(grid, len(names) // grid.size)
+    if 'depth_grid' in enc.files:
+        depth = np.asarray(enc['depth_grid'], 'float64')
+    else:
+        depth = np.linspace(grid[0], grid[-1], PREDICT_NDEP)
+    pol = bool(enc['pol_over_i']) if 'pol_over_i' in enc.files else False
+    return names, where, depth, pol
+
+
+def _member_spread(phys_members):
+    """Ensemble spread per physical quantity (azimuth: circular spread of
+    the doubled angle, i.e. respecting the 180-degree ambiguity)."""
+    out = {}
+    for v in phys_members[0]:
+        st = np.stack([p[v] for p in phys_members])
+        if v == 'azi':
+            r = np.abs(np.exp(2j * st).mean(0))
+            out[v] = np.sqrt(-2.0 * np.log(np.clip(r, 1e-12, 1.0))) / 2.0
+        else:
+            out[v] = st.std(0)
+    return out
+
+
 def predict(run_dir, ckpt_dir, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     device = _device()
     models, enc = load_ensemble(ckpt_dir, device)
     stats = {k[8:]: (enc[f'stat_mu_{k[8:]}'], enc[f'stat_sd_{k[8:]}'])
              for k in enc.files if k.startswith('stat_mu_')}
-    names = [str(s) for s in enc['target_names']]
+    names, where, depth, pol = _encoding_layout(enc)
     ym, ys = enc['y_mean'], enc['y_std']
 
-    sample, (ny, nx) = nd.rundir_to_sample(run_dir, stats)
+    sample, (ny, nx) = nd.rundir_to_sample(run_dir, stats, pol_over_i=pol)
     yy, xx = np.meshgrid(np.arange(ny), np.arange(nx), indexing='ij')
     coords = np.stack([yy.ravel(), xx.ravel()], 1).astype('float64')
 
@@ -93,19 +125,18 @@ def predict(run_dir, ckpt_dir, out_dir):
     epi = np.sqrt(mus.var(0)) * ys
     ale = np.sqrt(avr.mean(0)) * ys
 
-    phys = nd.decode_targets(mean.astype('float64'), names)
+    # stratifications on the output depth grid, built like STiC builds
+    # them from nodes (the inversion's own grid for node-based checkpoints)
+    phys = nd.stratify(mean, names, where, depth)
+    spread = _member_spread([nd.stratify(mus[k] * ys + ym, names, where,
+                                         depth) for k in range(len(models))])
 
-    # dense-grid STiC model
-    ltau_out = np.linspace(C.LTAU_GRID[0], C.LTAU_GRID[-1], PREDICT_NDEP)
-    m = stic_io.Model(nt=1, ny=ny, nx=nx, ndep=PREDICT_NDEP)
-    m.ltau[:] = ltau_out[None, None, None, :]
+    m = stic_io.Model(nt=1, ny=ny, nx=nx, ndep=depth.size)
+    m.ltau[:] = depth[None, None, None, :]
     m.pgas[:] = 1.0
     for v, arr in phys.items():
-        dense = np.empty((arr.shape[0], PREDICT_NDEP))
-        for i in range(arr.shape[0]):
-            dense[i] = np.interp(ltau_out, C.LTAU_GRID, arr[i])
         a = stic_io._ATTR.get(v, v)
-        getattr(m, a)[0] = dense.reshape(ny, nx, -1)
+        getattr(m, a)[0] = arr.reshape(ny, nx, -1)
     m.vturb[0] = np.maximum(m.vturb[0], 0.0)
     out_nc = os.path.join(out_dir, 'predicted_atmos.nc')
     m.write(out_nc, write_all=False)
@@ -115,7 +146,7 @@ def predict(run_dir, ckpt_dir, out_dir):
     for tag, reg in sample['regions'].items():
         if reg['rd'][0] > 1.001:
             coarse_cells[tag] = float(reg['rd'][0])
-    idep = np.argmin(np.abs(C.LTAU_GRID - (-1.0)))
+    idep = int(np.argmin(np.abs(depth - (-1.0))))
     diag_maps = {
         'temp@ltau-1': phys['temp'][:, idep].reshape(ny, nx),
         'vlos@ltau-1': phys['vlos'][:, idep].reshape(ny, nx),
@@ -129,7 +160,10 @@ def predict(run_dir, ckpt_dir, out_dir):
         os.path.join(out_dir, 'prediction.npz'),
         mean_std_units=mus.mean(0), epistemic_std=epi.reshape(ny, nx, -1),
         aleatoric_std=ale.reshape(ny, nx, -1),
-        target_names=np.asarray(names), ltau_grid=C.LTAU_GRID)
+        target_names=np.asarray(names), target_ltau=where,
+        depth_grid=depth, ltau_grid=np.asarray(enc['ltau_grid']),
+        **{f'std_{v}': a.reshape(ny, nx, -1).astype('float32')
+           for v, a in spread.items()})
     with open(os.path.join(out_dir, 'nyquist.json'), 'w') as f:
         import json
         json.dump(nyq, f, indent=1)

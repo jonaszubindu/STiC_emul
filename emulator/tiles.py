@@ -136,6 +136,85 @@ def read_cfg_key(cfg_text, key):
     return m.group(1) if m else None
 
 
+def read_cfg_last(cfg_text, key):
+    """Value of the LAST assignment of `key` (STiC reads input.cfg top to
+    bottom, so later lines override earlier ones), comments stripped."""
+    val = None
+    for ln in cfg_text.splitlines():
+        m = re.match(rf'^\s*{key}\s*=\s*(.*)$', ln)
+        if m:
+            val = m.group(1).split('#')[0].strip()
+    return val
+
+
+# input.cfg key per atmospheric quantity (emulator naming)
+NODE_KEYS = {'temp': 'nodes_temp', 'vlos': 'nodes_vlos',
+             'vturb': 'nodes_vturb', 'blong': 'nodes_blong',
+             'bhor': 'nodes_bhor', 'azi': 'nodes_azi'}
+
+
+def stic_nodes(cfg_text, ltau):
+    """Node positions (log tau) per quantity, reproducing STiC's rules
+    (input.cc): a single number N gives N nodes equally spaced between
+    the extremes of the model's depth grid (centred variant for
+    depth_interpolation = 3); a list gives explicit positions, each
+    snapped to the nearest grid point. Quantities without nodes (absent
+    or 0) are not inverted and map to an empty array.
+
+    Inner equidistant nodes are snapped to the grid as well (equidist()
+    calls nodeLocation()), so e.g. 5 nodes on [-8, 1] sit at
+    -8, -5.8, -3.5, -1.3, 1 rather than -5.75 and -1.25.
+
+    STiC builds each quantity linearly between its nodes and keeps it
+    constant beyond the outermost ones (linpol, no extrapolation), i.e.
+    np.interp(depth, nodes, values).
+    """
+    ltau = np.asarray(ltau, 'float64')
+    dt = read_cfg_last(cfg_text, 'depth_t')
+    if dt is not None and int(float(dt)) != 0:
+        raise ValueError('node targets need depth_t = 0 (log tau nodes)')
+    dint = read_cfg_last(cfg_text, 'depth_interpolation')
+    dint = 0 if dint is None else int(float(dint))
+    if dint not in (0,):
+        raise ValueError(f'depth_interpolation = {dint}: STiC does not '
+                         'interpolate linearly between nodes, so node '
+                         'targets would not reproduce the profiles; use '
+                         "TARGET_REPR = 'grid'")
+    out = {}
+    lo, hi = ltau.min(), ltau.max()
+    for var, key in NODE_KEYS.items():
+        raw = read_cfg_last(cfg_text, key)
+        if raw is None or raw == '':
+            out[var] = np.zeros(0)
+            continue
+        vals = [float(v) for v in raw.replace(',', ' ').split()]
+        if len(vals) == 1:
+            n = int(round(vals[0]))
+            if n <= 0:
+                out[var] = np.zeros(0)
+            elif n == 1:
+                out[var] = np.array([0.0])       # one node: constant profile
+            else:
+                # equidist(): grid ends exactly, inner nodes snapped to the
+                # nearest grid point (first match wins on ties)
+                dx = (hi - lo) / (n - 1.0)
+                x = np.empty(n)
+                for ii in range(1, n - 1):
+                    x[ii] = _node_location(ltau, dx * ii + lo)
+                x[0], x[-1] = lo, hi
+                out[var] = x
+        else:
+            snapped = [_node_location(ltau, v) for v in vals]
+            out[var] = np.unique(np.asarray(snapped, 'float64'))
+    return out
+
+
+def _node_location(ltau, x):
+    """STiC's nodeLocation(): the grid point closest to x; np.argmin,
+    like STiC's strict '<' scan, returns the first one on ties."""
+    return float(ltau[int(np.argmin(np.abs(ltau - x)))])
+
+
 # --------------------------------------------------------------------------- #
 # tile geometry
 # --------------------------------------------------------------------------- #

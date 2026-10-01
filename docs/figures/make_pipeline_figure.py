@@ -17,17 +17,18 @@ from matplotlib.patches import FancyBboxPatch, Rectangle, FancyArrowPatch
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ---- dataset-specific numbers (inv_fovb data set) ------------------------- #
-# label, wavelength, grid (ny, nx), cell size [reference px], input channels
+# label, wavelength, grid (ny, nx), cell size [reference px], channel text
 REGIONS = [
-    ('CHROMIS', r'Ca II K', (140, 140), 1.00, 31),
-    ('CHROMIS', r'4000 $\AA$ cont.', (140, 140), 1.00, 1),
-    ('CRISP', r'Fe I 6302 $\AA$', (73, 72), 1.89, 48),
-    ('CRISP', r'Ca II 8542 $\AA$', (53, 53), 2.57, 64),
+    ('CHROMIS', r'Ca II K', (140, 140), 1.00, 'Stokes I, 31 λ'),
+    ('CHROMIS', r'4000 $\AA$ cont.', (140, 140), 1.00, 'Stokes I, 1 λ'),
+    ('CRISP', r'Fe I 6302 $\AA$', (73, 72), 1.89,
+     'Stokes IQUV, 12 λ\n(Q, U, V divided by I)'),
+    ('CRISP', r'Ca II 8542 $\AA$', (53, 53), 2.57,
+     'Stokes IQUV, 16 λ\n(Q, U, V divided by I)'),
 ]
 
 # ---- network / training settings (emulator/emu_config.py) ---------------- #
 C_FEAT, ENC_LAYERS, DEC_HIDDEN, N_ENS = 64, 3, 512, 4
-N_NODES, N_QUANT = 16, 7
 
 # ---- style ---------------------------------------------------------------- #
 plt.rcParams.update({'font.size': 6.5, 'font.family': 'DejaVu Sans',
@@ -159,7 +160,7 @@ box(47.4, 82.0, 11.0, 11.4, 'Label selection',
     '(15 % of 20 px\nblocks, 3 px guard)', kind='ml', fs=6.1)
 box(47.4, 63.0, 11.0, 13.4, 'Ensemble\ntraining',
     f'{N_ENS} networks, panel (b)\nGaussian NLL,\nearly stopping on\n'
-    'held-out pixels', kind='ml', title_gap=2.4, fs=6.1)
+    'held-out error', kind='ml', title_gap=2.4, fs=6.1)
 box(60.0, 63.0, 11.0, 13.4, 'Prediction',
     'full-FOV\natmosphere\n' + r'+ $\sigma_\mathrm{aleatoric}$,'
     + '\n' + r'$\sigma_\mathrm{epistemic}$', kind='out')
@@ -195,8 +196,8 @@ for (inst, line, (ny, nx), cell, nch), y0 in zip(REGIONS, row_y):
     ax.text(7.8, y0 + ICON - 0.8, f'{inst}  {line}', fontsize=6.3,
             weight='bold', va='center')
     ax.text(7.8, y0 + ICON / 2 - 0.2,
-            f'{ny}×{nx} px, cell {cell:.2f}\n{nch} λ×Stokes channels\n'
-            '+ pixel-weight mask', fontsize=6.0, va='center',
+            f'{ny}×{nx} px, cell {cell:.2f}\n{nch}', fontsize=6.0,
+            va='center',
             linespacing=1.2)
     # query position marker on the icon
     ax.plot(0.8 + 0.62 * ICON, y0 + 0.55 * ICON, 'o', ms=2.4,
@@ -265,18 +266,19 @@ ax.text(dx0 + dw / 2, 42.4, 'Decoder (per pixel)', ha='center',
 
 # heads
 hx0, hw = 66.2, 5.4
-box(hx0, 28.0, hw, 4.8, r'$\mu$', f'{N_NODES * N_QUANT} values',
+box(hx0, 28.0, hw, 4.8, r'$\mu$', 'node values',
     kind='out', fs=6.0, tfs=7.0, title_gap=1.3)
-box(hx0, 21.4, hw, 4.8, r'$\log\sigma^2$', f'{N_NODES * N_QUANT} values',
+box(hx0, 21.4, hw, 4.8, r'$\log\sigma^2$', 'per node',
     kind='out', fs=6.0, tfs=7.0, title_gap=1.3)
 arrow((dx0 + dw, 25.4), (hx0, 30.4), rad=0.0)
 arrow((dx0 + dw, 25.4), (hx0, 23.8), rad=0.0)
 
 # output definition
 ax.text(64.2, 20.4,
-        f'{N_QUANT} quantities × {N_NODES} nodes in\n' + r'$\log\tau_{500}$'
-        + ' = −7 … 0.8:\n' + r'$\log T,\ v_\mathrm{los},\ v_\mathrm{turb},$'
-        + '\n' + r'$B_\parallel,\ B_\perp,\ \sin2\phi,\ \cos2\phi$',
+        'values at the inversion\'s STiC\nnodes in ' + r'$\log\tau_{500}$' + ':\n'
+        + r'$\log T,\ v_\mathrm{los},\ v_\mathrm{turb},\ B_\parallel,$' + '\n'
+        + r'$B_\perp\cos2\phi,\ B_\perp\sin2\phi$' + '\nprofiles rebuilt linearly\n'
+        'between nodes, as in STiC',
         ha='center', va='top', fontsize=6.0, linespacing=1.3)
 
 # training / ensemble strip
@@ -291,7 +293,7 @@ ax.text(1.6, 5.8,
         r'$\lambda\,\sum(\partial^2\mu/\partial\log\tau^2)^2$ with '
         r'$\lambda=10^{-3}$' + '\n'
         r'AdamW (lr $3\times10^{-4}$, cosine schedule), ≤20 000 steps of '
-        r'4 records × ≤2048 pixels, early stopping on the held-out loss'
+        r'4 records × ≤2048 pixels, early stopping on the held-out prediction error'
         + '\n' + f'Ensemble of {N_ENS} members (different initializations): '
         r'prediction = ensemble mean, '
         r'$\sigma_\mathrm{aleatoric} = \langle\sigma^2\rangle^{1/2}$, '

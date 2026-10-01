@@ -26,44 +26,168 @@ from . import emu_config as C
 
 
 # --------------------------------------------------------------------------- #
-# target encoding (same conventions as STIC_vers_2025/nn_emulator)
+# target encoding
+#
+# Every output channel has a quantity name (e.g. 'log_temp') and a log tau
+# position. Channels with the same name form a group, and a group's depth
+# profile is the linear interpolation between its positions, constant
+# beyond the outermost one. With the inversion's own nodes as positions
+# ('nodes' representation) this is exactly STiC's node expansion
+# (depthmodel.cc nodes2depth / linpol), so every kink is reproduced.
 # --------------------------------------------------------------------------- #
 
-def encode_targets_arrays(ltau, arrs):
-    """arrs: dict var -> (ny, nx, ndep). Returns (Y_raw (npix, nout), names)."""
+def interp_matrix(xx, x):
+    """A with A @ y == np.interp(xx, x, y) for any y (x ascending)."""
+    xx = np.asarray(xx, 'float64')
+    x = np.asarray(x, 'float64')
+    A = np.zeros((xx.size, x.size))
+    if x.size == 1:
+        A[:, 0] = 1.0
+        return A
+    for i, t in enumerate(xx):
+        if t <= x[0]:
+            A[i, 0] = 1.0
+        elif t >= x[-1]:
+            A[i, -1] = 1.0
+        else:
+            k = int(np.searchsorted(x, t))       # x[k-1] < t <= x[k]
+            w = (t - x[k - 1]) / (x[k] - x[k - 1])
+            A[i, k - 1], A[i, k] = 1.0 - w, w
+    return A
+
+
+def target_positions(nodes=None):
+    """log tau positions of the output channels per quantity: the
+    inversion's nodes where given, otherwise LTAU_GRID (also for
+    quantities that were not inverted)."""
+    pos, exact = {}, {}
+    for v in C.TARGET_VARS:
+        n = None if nodes is None else nodes.get(v)
+        exact[v] = n is not None and len(n) > 0
+        pos[v] = np.sort(np.asarray(n, 'float64')) if exact[v] \
+            else C.LTAU_GRID.astype('float64')
+    if C.B_PERP_VECTOR:
+        pos['bperp'] = np.union1d(pos['bhor'], pos['azi'])
+    return pos, exact
+
+
+def profile_to_targets(ltau, prof, pos, exact):
+    """(npix, ndep) profiles -> (npix, npos) values at `pos`. exact: the
+    profiles are piecewise linear on `pos` (STiC nodes) and the node
+    values are recovered by least squares (also off-grid nodes);
+    otherwise the profiles are sampled at `pos`."""
+    A = interp_matrix(ltau, pos)                         # depth <- pos
+    if exact:
+        sol = np.linalg.lstsq(A, np.asarray(prof, 'float64').T, rcond=None)[0]
+        return sol.T
+    return np.asarray(prof, 'float64') @ interp_matrix(pos, ltau).T
+
+
+def encode_targets_arrays(ltau, arrs, pos, exact):
+    """arrs: dict var -> (ny, nx, ndep). Returns (Y_raw (npix, nout),
+    names, where) with `where` the log tau position of every channel."""
     ny, nx, nd = arrs['temp'].shape
     npix = ny * nx
-    cols, names = [], []
+    cols, names, where = [], [], []
+
+    def add(name, vals, p):
+        cols.append(vals)
+        names.extend([name] * len(p))
+        where.extend(list(p))
+
+    def at(v):
+        return profile_to_targets(ltau, arrs[v].reshape(npix, nd),
+                                  pos[v], exact[v])
+
     for v in C.TARGET_VARS:
-        raw = arrs[v].reshape(npix, nd)
-        grid = np.empty((npix, C.LTAU_GRID.size))
-        for i in range(npix):
-            grid[i] = np.interp(C.LTAU_GRID, ltau, raw[i])
+        if C.B_PERP_VECTOR and v == 'azi':
+            continue                    # folded into the transverse vector
+        if C.B_PERP_VECTOR and v == 'bhor':
+            # B_hor and azimuth at their own nodes (as STiC builds them),
+            # then the vector (B_hor cos 2phi, B_hor sin 2phi) at the union
+            P = pos['bperp']
+            bh = at('bhor') @ interp_matrix(P, pos['bhor']).T
+            az = at('azi') @ interp_matrix(P, pos['azi']).T
+            add('bperp_c', bh * np.cos(2 * az), P)
+            add('bperp_s', bh * np.sin(2 * az), P)
+            continue
+        vals = at(v)
         if v == 'temp' and C.LOG_TEMP:
-            grid = np.log10(np.maximum(grid, 1.0))
-            names += ['log_temp'] * grid.shape[1]
+            add('log_temp', np.log10(np.maximum(vals, 1.0)), pos[v])
         elif v == 'azi' and C.AZI_SINCOS:
-            s, c = np.sin(2 * grid), np.cos(2 * grid)
-            grid = np.hstack([s, c])
-            names += ['azi_sin'] * s.shape[1] + ['azi_cos'] * c.shape[1]
+            add('azi_sin', np.sin(2 * vals), pos[v])
+            add('azi_cos', np.cos(2 * vals), pos[v])
         else:
-            names += [v] * grid.shape[1]
-        cols.append(grid)
-    return np.hstack(cols), names
+            add(v, vals, pos[v])
+    return np.hstack(cols), names, np.asarray(where, 'float64')
 
 
-def decode_targets(Y, names):
+def stratify(Y, names, where, depth):
+    """Outputs in target units -> physical stratifications on `depth`,
+    built like STiC: linear between channel positions, constant beyond.
+    Works for every encoding (old 16-point grid checkpoints included)."""
     names = np.asarray(names)
+    where = np.asarray(where, 'float64')
+    Y = np.asarray(Y, 'float64')
+
+    def has(n):
+        return bool(np.any(names == n))
+
+    def grp(n, f=None):
+        sel = np.where(names == n)[0]
+        order = np.argsort(where[sel], kind='stable')
+        x, v = where[sel][order], Y[:, sel[order]]
+        if f is not None:
+            v = f(v)
+        return v @ interp_matrix(depth, x).T
+
     out = {}
-    for v in C.TARGET_VARS:
-        if v == 'temp' and C.LOG_TEMP:
-            out[v] = 10.0 ** Y[:, names == 'log_temp']
-        elif v == 'azi' and C.AZI_SINCOS:
-            out[v] = np.mod(0.5 * np.arctan2(Y[:, names == 'azi_sin'],
-                                             Y[:, names == 'azi_cos']), np.pi)
-        else:
-            out[v] = Y[:, names == v]
+    out['temp'] = grp('log_temp', lambda v: 10.0 ** v) if has('log_temp') \
+        else grp('temp')
+    for v in ('vlos', 'vturb', 'blong'):
+        if has(v):
+            out[v] = grp(v)
+    if has('bperp_c'):
+        c, s = grp('bperp_c'), grp('bperp_s')
+        out['bhor'] = np.hypot(c, s)
+        out['azi'] = np.mod(0.5 * np.arctan2(s, c), np.pi)
+    else:
+        if has('bhor'):
+            out['bhor'] = grp('bhor')
+        if has('azi_sin'):
+            out['azi'] = np.mod(0.5 * np.arctan2(grp('azi_sin'),
+                                                 grp('azi_cos')), np.pi)
+        elif has('azi'):
+            out['azi'] = grp('azi')
     return out
+
+
+def dataset_nodes(recs):
+    """Node positions per quantity for the 'nodes' representation: stored
+    in the records at harvest time, or computed from emu_config.NODES_CFG
+    for records harvested before that. Must agree across records."""
+    if C.TARGET_REPR != 'nodes':
+        return None
+    found = []
+    for z in recs:
+        if all(f'nodes_{v}' in z.files for v in C.TARGET_VARS):
+            found.append({v: np.asarray(z[f'nodes_{v}'], 'float64')
+                          for v in C.TARGET_VARS})
+        elif C.NODES_CFG:
+            with open(C.NODES_CFG) as f:
+                found.append(tiles.stic_nodes(f.read(), z['ltau']))
+        else:
+            raise ValueError(
+                'a label record carries no node positions: re-harvest it '
+                'with the current code, or set emu_config.NODES_CFG to the '
+                'input.cfg of the inversion that produced it')
+    ref = found[0]
+    for d in found[1:]:
+        for v in C.TARGET_VARS:
+            if d[v].shape != ref[v].shape or not np.allclose(d[v], ref[v]):
+                raise ValueError(f'label records use different {v} nodes; '
+                                 'one network needs one node setup')
+    return ref
 
 
 # --------------------------------------------------------------------------- #
@@ -83,6 +207,20 @@ def _used_channels(weights):
     """Indices (w, s) of channels that carry data."""
     w, s = np.where(weights < 1e10)
     return w, s
+
+
+def region_channels(dat, weights, pol_over_i=False):
+    """(ny, nx, nw, ns) profiles -> (C, ny, nx) float32 of the used
+    channels. pol_over_i: Stokes Q, U, V are divided by the pixel's mean
+    Stokes I over the used wavelengths of this region."""
+    w, s = _used_channels(np.asarray(weights))
+    x = np.asarray(dat, 'float64')[:, :, w, s]          # (ny, nx, C)
+    if pol_over_i and (s == 0).any() and (s > 0).any():
+        i_mean = x[..., s == 0].mean(axis=-1)
+        pos = i_mean[np.isfinite(i_mean) & (i_mean > 0)]
+        floor = 1e-3 * np.median(pos) if pos.size else 1.0
+        x[..., s > 0] /= np.maximum(i_mean, floor)[..., None]
+    return np.moveaxis(x, -1, 0).astype('float32')
 
 
 def split_codes(src, coords, frac=None, block=None, guard=None, seed=None):
@@ -128,7 +266,8 @@ def split_codes(src, coords, frac=None, block=None, guard=None, seed=None):
     return np.where(val, 1, np.where(near, 2, 0)).astype('int8')
 
 
-def record_to_sample(rec, stats=None, with_targets=True, chi2_thr=None):
+def record_to_sample(rec, stats=None, with_targets=True, chi2_thr=None,
+                     pos=None, exact=None, pol_over_i=False):
     """One harvested npz record -> sample dict (see module docstring).
 
     chi2_thr: drop label pixels whose pixel_chi2 exceeds it (records
@@ -139,11 +278,9 @@ def record_to_sample(rec, stats=None, with_targets=True, chi2_thr=None):
     m0x, m0y = int(rec['mx0']), int(rec['my0'])
     regions = {}
     for tag in tags:
-        dat = np.asarray(rec[f'{tag}_dat'], 'float32')     # (ny, nx, nw, ns)
-        wgt = np.asarray(rec[f'{tag}_weights'])
         pw = np.asarray(rec[f'{tag}_pweights'], 'float32')
-        w, s = _used_channels(wgt)
-        img = np.moveaxis(dat[:, :, w, s], -1, 0)          # (C, ny, nx)
+        img = region_channels(rec[f'{tag}_dat'], rec[f'{tag}_weights'],
+                              pol_over_i)                 # (C, ny, nx)
         if stats is not None:
             mu, sd = stats[tag]
             img = (img - mu[:, None, None]) / sd[:, None, None]
@@ -161,8 +298,10 @@ def record_to_sample(rec, stats=None, with_targets=True, chi2_thr=None):
         gy, gx = np.meshgrid(yy, xx, indexing='ij')
         coords = np.stack([gy.ravel(), gx.ravel()], axis=1).astype('float64')
         arrs = {v: np.asarray(rec[v], 'float64') for v in C.TARGET_VARS}
-        Y, names = encode_targets_arrays(np.asarray(rec['ltau'], 'float64'),
-                                         arrs)
+        if pos is None:
+            pos, exact = target_positions(None)
+        Y, names, where = encode_targets_arrays(
+            np.asarray(rec['ltau'], 'float64'), arrs, pos, exact)
         good = np.isfinite(Y).all(axis=1)
         if 'pixel_chi2' in rec.files and chi2_thr is not None:
             good &= np.ravel(rec['pixel_chi2']) <= chi2_thr
@@ -171,6 +310,7 @@ def record_to_sample(rec, stats=None, with_targets=True, chi2_thr=None):
         out['coords'] = coords
         out['Y_raw'] = Y
         out['target_names'] = names
+        out['target_ltau'] = where
         out['src'] = os.path.normpath(str(rec['src']))
     return out
 
@@ -217,7 +357,7 @@ def load_records(label_dirs, chi2_max=None):
     return recs
 
 
-def channel_stats(recs):
+def channel_stats(recs, pol_over_i=False):
     """Per-region per-channel mean/std over all tiles' active pixels."""
     stats = {}
     tags = sorted({k.rsplit('_', 1)[0] for k in recs[0].files
@@ -225,9 +365,9 @@ def channel_stats(recs):
     for tag in tags:
         acc = []
         for z in recs:
-            dat = np.asarray(z[f'{tag}_dat'], 'float64')
-            w, s = _used_channels(np.asarray(z[f'{tag}_weights']))
-            x = dat[:, :, w, s].reshape(-1, w.size)
+            img = region_channels(z[f'{tag}_dat'], z[f'{tag}_weights'],
+                                  pol_over_i)
+            x = img.reshape(img.shape[0], -1).T.astype('float64')
             acc.append(x[np.isfinite(x).all(axis=1)])
         X = np.vstack(acc)
         mu = X.mean(0)
@@ -241,9 +381,15 @@ def build_dataset(label_dirs, chi2_max=None):
     """Returns (samples, meta): standardized samples with standardized
     targets, plus everything needed to reproduce the encoding."""
     recs = load_records(label_dirs, chi2_max)
-    stats = channel_stats(recs)
+    stats = channel_stats(recs, C.POL_OVER_I)
     thr, how = chi2_threshold(recs)
-    raw = [record_to_sample(z, stats=stats, chi2_thr=thr) for z in recs]
+    nodes = dataset_nodes(recs)
+    pos, exact = target_positions(nodes)
+    depth = np.asarray(recs[0]['ltau'], 'float64')
+    _report_representation(recs[0], pos, exact, depth)
+    raw = [record_to_sample(z, stats=stats, chi2_thr=thr, pos=pos,
+                            exact=exact, pol_over_i=C.POL_OVER_I)
+           for z in recs]
     n_all = sum(s['n_label_px'] for s in raw)
     n_kept = sum(len(s['coords']) for s in raw)
     thr_txt = 'none' if thr is None else f'{thr:.4g}'
@@ -269,7 +415,7 @@ def build_dataset(label_dirs, chi2_max=None):
     if len(Ytr) == 0:
         Ytr = np.vstack([s['Y_raw'] for s in raw])
     ym, ys = Ytr.mean(0), Ytr.std(0)
-    ys[ys < 1e-12] = 1.0
+    ys = _floor_spread(ys, raw[0]['target_names'])
     for s in raw:
         s['Y'] = ((s['Y_raw'] - ym) / ys).astype('float32')
         del s['Y_raw']
@@ -280,11 +426,58 @@ def build_dataset(label_dirs, chi2_max=None):
                               for t in raw[0]['regions']},
                 chi2_threshold=thr, chi2_how=how,
                 split=dict(frac=C.VAL_FRACTION, block=C.VAL_BLOCK,
-                           guard=C.VAL_GUARD, seed=C.VAL_SEED))
+                           guard=C.VAL_GUARD, seed=C.VAL_SEED),
+                target_ltau=raw[0]['target_ltau'], depth_grid=depth,
+                target_repr=C.TARGET_REPR if nodes is not None else 'grid',
+                nodes={v: [float(x) for x in nodes[v]] for v in nodes}
+                if nodes is not None else None,
+                pol_over_i=bool(C.POL_OVER_I),
+                b_perp_vector=bool(C.B_PERP_VECTOR))
     return raw, meta
 
 
-def rundir_to_sample(run_dir, stats):
+def _floor_spread(ys, names):
+    """Outputs that barely vary across the training pixels (e.g. a node
+    the inversion left at its starting value) would be divided by ~0 and
+    turn any small held-out difference into a huge standardized value.
+    Their spread is floored at a physically negligible size
+    (emu_config.TARGET_SPREAD_FLOOR)."""
+    names = np.asarray(names)
+    out = np.asarray(ys, 'float64').copy()
+    floor = np.array([C.TARGET_SPREAD_FLOOR.get(str(n), 0.0) for n in names])
+    out = np.maximum(out, floor)
+    out[out < 1e-12] = 1.0
+    n_fl = int((out > ys * (1 + 1e-9)).sum())
+    if n_fl:
+        print(f'build_dataset: {n_fl} output(s) barely vary across the '
+              f'training pixels; standardized with the minimum spread')
+    return out
+
+
+def _report_representation(rec, pos, exact, depth):
+    """How well the output representation reproduces the labels of one
+    record (exact up to float32 precision when the nodes match the
+    inversion; a large error means the node setup does not match)."""
+    arrs = {v: np.asarray(rec[v], 'float64') for v in C.TARGET_VARS}
+    Y, names, where = encode_targets_arrays(depth, arrs, pos, exact)
+    back = stratify(Y, names, where, depth)
+    msg = []
+    for v, unit, sc in (('temp', 'K', 1.0), ('vlos', 'km/s', 1e-5),
+                        ('vturb', 'km/s', 1e-5), ('blong', 'G', 1.0),
+                        ('bhor', 'G', 1.0)):
+        lab = arrs[v].reshape(back[v].shape)
+        err = np.abs(back[v] - lab) * sc
+        msg.append(f'{v} {np.max(err):.3g} {unit}')
+    print('representation check (max |rebuilt - label| over one record): '
+          + ', '.join(msg))
+    for v in C.TARGET_VARS:
+        how = (f'{len(pos[v])} STiC nodes' if exact[v]
+               else f'{len(pos[v])}-point grid')
+        print(f'  {v}: {how} at log tau ' +
+              ' '.join(f'{x:.2f}' for x in pos[v]))
+
+
+def rundir_to_sample(run_dir, stats, pol_over_i=False):
     """Full run dir -> prediction sample (all regions, full windows)."""
     with open(os.path.join(run_dir, 'input.cfg')) as f:
         regs = tiles.parse_regions(f.read())
@@ -292,8 +485,7 @@ def rundir_to_sample(run_dir, stats):
     for reg in regs:
         o = tiles.CoupledObs(os.path.join(run_dir, reg['obs_file']))
         tag = os.path.splitext(os.path.basename(reg['obs_file']))[0]
-        w, s = _used_channels(o.weights)
-        img = np.moveaxis(o.dat[0][:, :, w, s], -1, 0).astype('float32')
+        img = region_channels(o.dat[0], o.weights, pol_over_i)
         mu, sd = stats[tag]
         img = (np.nan_to_num(img) - mu[:, None, None]) / sd[:, None, None]
         img = np.concatenate([img, o.pweights[0][None].astype('float32')], 0)

@@ -70,17 +70,20 @@ def train_member(k, samples_t, samples_v, meta, out_dir, device,
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps)
 
     def val_loss():
+        """(nll, mse) on the held-out pixels; mse is the error of the
+        predicted values in standardized target units."""
         model.eval()
-        tot, n = 0.0, 0
+        nll, mse, n = 0.0, 0.0, 0
         with torch.no_grad():
             for s in samples_v:
                 nv = min(len(s['coords']), 8192)
                 mu, lv = model(s, s['coords'][:nv], device)
                 y = torch.as_tensor(s['Y'][:nv], device=device)
-                tot += loss_fn(mu, lv, y, groups, 0.0).item() * nv
+                nll += loss_fn(mu, lv, y, groups, 0.0).item() * nv
+                mse += ((mu - y) ** 2).mean().item() * nv
                 n += nv
         model.train()
-        return tot / max(n, 1)
+        return nll / max(n, 1), mse / max(n, 1)
 
     best, best_step = np.inf, 0
     ckpt = os.path.join(out_dir, f'member_{k}.pt')
@@ -102,11 +105,19 @@ def train_member(k, samples_t, samples_v, meta, out_dir, device,
         opt.step()
         sched.step()
         if (it + 1) % 200 == 0 or it == steps - 1:
-            vl = val_loss() if samples_v else loss.item() * C.TILES_PER_STEP
+            if samples_v:
+                v_nll, v_mse = val_loss()
+                vl = v_mse if C.EARLY_STOP_ON == 'mse' else v_nll
+                txt = f'held-out nll {v_nll:8.4f}  mse {v_mse:.4f}'
+            else:
+                vl = loss.item() * C.TILES_PER_STEP
+                txt = f'train loss {vl:.4f}'
             if vl < best:
                 best, best_step = vl, it
                 torch.save(model.state_dict(), ckpt)
-            print(f'train[{k}] step {it + 1:6d}  val {vl:.4f}  best {best:.4f}')
+            print(f'train[{k}] step {it + 1:6d}  {txt}  '
+                  f'best {C.EARLY_STOP_ON if samples_v else "loss"} '
+                  f'{best:.4f} @ {best_step + 1}')
             if it - best_step > C.PATIENCE_STEPS:
                 print(f'train[{k}]: early stop')
                 break
@@ -150,7 +161,10 @@ def train_ensemble(label_dirs, out_dir, steps=None, n_ensemble=None,
             old = json.load(f)
         mine = dict(n_out=meta['n_out'],
                     chi2_threshold=meta['chi2_threshold'],
-                    split=meta['split'], n_train_px=n_tr)
+                    split=meta['split'], n_train_px=n_tr,
+                    target_repr=meta['target_repr'],
+                    pol_over_i=meta['pol_over_i'],
+                    b_perp_vector=meta['b_perp_vector'])
         diff = [k for k, v in mine.items() if old.get(k) != v]
         if diff:
             raise ValueError(
@@ -161,6 +175,9 @@ def train_ensemble(label_dirs, out_dir, steps=None, n_ensemble=None,
         np.savez(os.path.join(out_dir, 'encoding.npz'),
                  y_mean=meta['y_mean'], y_std=meta['y_std'],
                  target_names=np.asarray(meta['target_names']),
+                 target_ltau=np.asarray(meta['target_ltau']),
+                 depth_grid=np.asarray(meta['depth_grid']),
+                 pol_over_i=meta['pol_over_i'],
                  ltau_grid=C.LTAU_GRID,
                  **{f'stat_mu_{t}': meta['stats'][t][0]
                     for t in meta['stats']},
@@ -175,6 +192,11 @@ def train_ensemble(label_dirs, out_dir, steps=None, n_ensemble=None,
                            chi2_threshold=meta['chi2_threshold'],
                            chi2_how=meta['chi2_how'],
                            split=meta['split'],
+                           target_repr=meta['target_repr'],
+                           nodes=meta['nodes'],
+                           pol_over_i=meta['pol_over_i'],
+                           b_perp_vector=meta['b_perp_vector'],
+                           early_stop_on=C.EARLY_STOP_ON,
                            n_train_px=n_tr, n_val_px=n_va, n_guard_px=n_gu),
                       f, indent=1)
 
