@@ -209,6 +209,55 @@ def region_tag(obs_file):
     return os.path.splitext(os.path.basename(obs_file))[0]
 
 
+def degrade_synthetic(run_dir, synth_file, out_dir=None):
+    """Rebuild coupled STiC's out_<obs> files (synthetics degraded to each
+    instrument grid) from a fine-grid synthetic of the same atmosphere,
+    e.g. the output_profiles ('stk') file of a mode-2 synthesis.
+
+    STiC applies the per-pixel instrumental profile and spectral
+    degradation before writing that file (slave.cc), so only the spatial
+    degradation D_r (PSF + destretch + rebin, verified against STiC to
+    ~1e-14) remains. Regions are taken from run_dir/input.cfg; their
+    wavelength blocks follow one another in the synthetic file. The files
+    are written where STiC writes them: out_<obs entry> under out_dir
+    (default run_dir).
+    """
+    from netCDF4 import Dataset
+    out_dir = run_dir if out_dir is None else out_dir
+    with open(os.path.join(run_dir, 'input.cfg')) as f:
+        regions = tiles.parse_regions(f.read())
+    with Dataset(synth_file) as f:
+        syn = np.ma.filled(f.variables['profiles'][0], np.nan)  # (ny,nx,nw,ns)
+    ny, nx, nw_tot, ns = syn.shape
+    nws = [tiles.CoupledObs(os.path.join(run_dir, r['obs_file'])).nw
+           for r in regions]
+    if sum(nws) != nw_tot:
+        raise ValueError(f'{synth_file} has {nw_tot} wavelengths, the '
+                         f'regions in input.cfg add up to {sum(nws)}')
+    written, w0 = [], 0
+    for reg, nw in zip(regions, nws):
+        obs_path = os.path.join(run_dir, reg['obs_file'])
+        o = tiles.CoupledObs(obs_path)
+        D = dg.build_region_operator(obs_path, nx, ny)
+        block = syn[:, :, w0:w0 + nw, :].reshape(ny * nx, nw * ns)
+        deg = (D @ block).reshape(o.ny, o.nx, nw, ns)
+        w0 += nw
+        dst = os.path.join(out_dir, 'out_' + reg['obs_file'])
+        os.makedirs(os.path.dirname(dst) or '.', exist_ok=True)
+        with Dataset(dst, 'w', format='NETCDF4') as g:
+            g.createDimension('time')
+            g.createDimension('y', o.ny)
+            g.createDimension('x', o.nx)
+            g.createDimension('wav', nw)
+            g.createDimension('stokes', ns)
+            g.createVariable('profiles', 'f8',
+                             ('time', 'y', 'x', 'wav', 'stokes'))[0] = deg
+            g.createVariable('wav', 'f8', ('wav',))[:] = o.wav
+        written.append(dst)
+        print(f'degrade_synthetic: {dst}  ({o.ny}x{o.nx}, {nw} wavelengths)')
+    return written
+
+
 def out_obs_path(run_dir, obs_file):
     """Locate STiC's degraded-synthetic output for a region (named
     out_<obs> by STiC). With a subdirectory-prefixed obs entry the file
