@@ -189,7 +189,11 @@ def stratify(Y, names, where, depth, extrap=None):
 def dataset_nodes(recs):
     """Node positions per quantity for the 'nodes' representation: stored
     in the records at harvest time, or computed from emu_config.NODES_CFG
-    for records harvested before that. Must agree across records."""
+    for records harvested before that. Must agree across records.
+
+    A quantity without nodes (nodes_<var> = 0 in the cfg: not inverted in
+    that cycle, so its profile comes from an earlier cycle or the starting
+    model) gets its nodes inferred from the label profiles (infer_nodes)."""
     if C.TARGET_REPR != 'nodes':
         return None
     found = []
@@ -211,7 +215,47 @@ def dataset_nodes(recs):
             if d[v].shape != ref[v].shape or not np.allclose(d[v], ref[v]):
                 raise ValueError(f'label records use different {v} nodes; '
                                  'one network needs one node setup')
+    ltau = np.asarray(recs[0]['ltau'], 'float64')
+    for v in C.TARGET_VARS:
+        if len(ref[v]) == 0:
+            ref[v] = infer_nodes(ltau, [z[v] for z in recs])
+            print(f'dataset_nodes: {v} has no nodes in the cfg; '
+                  f'{len(ref[v])} nodes inferred from the label profiles '
+                  'at log tau ' + ' '.join(f'{x:.2f}' for x in ref[v]))
     return ref
+
+
+def infer_nodes(ltau, profiles):
+    """Node positions that reproduce piecewise-linear STiC profiles
+    exactly, read off the profiles themselves. STiC snaps nodes to the
+    depth grid and writes straight lines between them, linearly continued
+    beyond the outermost ones, so a profile bends only at its nodes: the
+    nodes are the grid points where the slope changes in at least
+    INFER_NODES_MIN_FRAC of the pixels, plus both grid ends (a linear
+    continuation beyond an end node is the same as a node at the grid end).
+    Slope changes below float32 rounding of the stored labels
+    (INFER_NODES_TOL machine epsilons) do not count.
+
+    profiles: list of (..., ndep) arrays on the common grid `ltau`."""
+    x = np.asarray(ltau, 'float64')
+    order = np.argsort(x)
+    x = x[order]
+    dx = np.diff(x)
+    hits = np.zeros(x.size, 'int64')
+    n = 0
+    for p in profiles:
+        p = np.asarray(p, 'float64').reshape(-1, x.size)[:, order]
+        p = p[np.isfinite(p).all(axis=1)]
+        s = np.diff(p, axis=1) / dx                      # segment slopes
+        bend = np.abs(np.diff(s, axis=1))                # at x[1:-1]
+        scale = np.abs(p).max(axis=1, keepdims=True)
+        tol = (C.INFER_NODES_TOL * np.finfo('float32').eps * scale
+               * (1.0 / dx[:-1] + 1.0 / dx[1:]))
+        hits[1:-1] += (bend > tol).sum(axis=0)
+        n += len(p)
+    inner = hits >= max(1, C.INFER_NODES_MIN_FRAC * n)
+    inner[[0, -1]] = True
+    return x[inner]
 
 
 # --------------------------------------------------------------------------- #
@@ -509,12 +553,13 @@ def _check_representation(rec, pos, exact, depth):
               ' '.join(f'{x:.2f}' for x in pos[v]))
     if bad and C.TARGET_REPR == 'nodes':
         txt = ('the output representation does not reproduce the labels: '
-               + '; '.join(bad) + '. The node positions stored in the '
-               'records are not the ones that built these profiles. A '
-               'quantity keeps the profile of the LAST cycle that inverted '
-               'it (nodes_<var> != 0), so give the input.cfg of every '
-               'cycle: labels.restore_nodes(record, [cfg_cycle1, '
-               'cfg_cycle2, ...]) or emu_config.NODES_CFG.')
+               + '; '.join(bad) + '. The node positions (from the cfg, or '
+               'inferred from the profiles) are not the ones that built '
+               'these profiles. A quantity keeps the profile of the LAST '
+               'cycle that inverted it (nodes_<var> != 0); giving the '
+               'input.cfg of every cycle fixes the nodes: '
+               'labels.restore_nodes(record, [cfg_cycle1, cfg_cycle2, '
+               '...]) or emu_config.NODES_CFG.')
         if C.REPR_CHECK == 'warn':
             print('WARNING: ' + txt)
         else:

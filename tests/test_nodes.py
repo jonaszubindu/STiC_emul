@@ -131,6 +131,38 @@ else:
     raise AssertionError('representation check must fail for the last '
                          'cycle alone')
 
+# automatic fallback: records harvested with the last cycle's cfg alone
+# (no T/vlos/vturb nodes) get those nodes inferred from the profiles,
+# stored in float32 like real labels
+import os, tempfile
+with tempfile.TemporaryDirectory() as d:
+    recs = []
+    for i in range(2):                      # two records, split pixels
+        sl = slice(i * npix // 2, (i + 1) * npix // 2)
+        f = os.path.join(d, f'rec{i}.npz')
+        np.savez(f, ltau=ltau,
+                 **{v: a[:, sl].astype('float32') for v, a in arrs.items()},
+                 **{f'nodes_{v}': x for v, x in last_only.items()})
+        recs.append(np.load(f))
+    inferred = nd.dataset_nodes(recs)
+    # 0.8 is linearly continued, so it is equivalent to a node at 1.0
+    want = np.r_[nodes['temp'][:-1], 1.0]
+    assert np.allclose(inferred['temp'], want), inferred['temp']
+    assert np.allclose(inferred['vlos'], np.r_[nodes['vlos'][:-1], 1.0])
+    assert np.allclose(inferred['vturb'], nodes['vturb'])
+    assert np.allclose(inferred['blong'], nodes['blong']), 'cfg nodes kept'
+    rec32 = {v: np.concatenate([z[v] for z in recs], axis=1)
+             for v in C.TARGET_VARS}
+    pos, exact = nd.target_positions(inferred)
+    nd._check_representation(rec32, pos, exact, ltau)
+    # a smooth, never-node-built profile: every grid point becomes a node,
+    # still exact
+    smooth = (6000 + 1000 * ltau ** 2)[None] * rng.uniform(1, 2, (20, 1))
+    assert len(nd.infer_nodes(ltau, [smooth.astype('float32')])) == ltau.size
+    # a constant profile: just the grid ends
+    assert len(nd.infer_nodes(ltau, [np.full((5, ltau.size), 3e4, 'float32')])) == 2
+    print('inferred nodes reproduce the float32 labels')
+
 # fixed-grid representation (old checkpoints) still decodes
 C.B_PERP_VECTOR = False
 pos, exact = nd.target_positions(None)

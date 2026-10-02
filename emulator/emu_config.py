@@ -15,6 +15,13 @@ TARGET_REPR = 'nodes'
 # quantity takes the nodes of the last cycle that inverted it).
 # None: re-harvest or labels.restore_nodes instead.
 NODES_CFG = None
+# Quantities without nodes in the cfg (nodes_<var> = 0, e.g. a B-only last
+# cycle) get their nodes inferred from the label profiles: grid points
+# where the slope changes by more than INFER_NODES_TOL float32 epsilons
+# (relative to the profile's magnitude) in at least INFER_NODES_MIN_FRAC
+# of the pixels.
+INFER_NODES_TOL = 100.0
+INFER_NODES_MIN_FRAC = 1e-3
 # Largest acceptable |rebuilt - label| of the output representation (target
 # units: K, cm/s, G). Above it training stops ('error') or only warns
 # ('warn'): the network could not reproduce the labels even in principle.

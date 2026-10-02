@@ -385,7 +385,8 @@ def _store_nodes(rec_out, cfg_texts, ltau):
     for v, x in nodes.items():
         rec_out[f'nodes_{v}'] = np.asarray(x, 'float64')
     print('harvest: nodes ' + ', '.join(
-        f'{v} {len(x)}' if len(x) else f'{v} - (not inverted)'
+        f'{v} {len(x)}' if len(x) else f'{v} - (inferred from the '
+        'profiles at training)'
         for v, x in nodes.items()))
 
 
