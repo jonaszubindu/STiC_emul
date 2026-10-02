@@ -5,13 +5,22 @@ import numpy as np
 # ---- targets -------------------------------------------------------------- #
 # 'nodes': the network predicts each quantity at the inversion's own STiC
 #   nodes (from input.cfg, stored in the label records at harvest) and the
-#   stratification is rebuilt exactly like STiC builds it (linear between
-#   nodes, constant beyond), so kinks are reproduced exactly.
+#   stratification is rebuilt exactly like STiC writes it (linear between
+#   nodes, linearly continued beyond the outermost ones), so kinks are
+#   reproduced exactly.
 # 'grid': all quantities on the fixed LTAU_GRID (the original setup).
 TARGET_REPR = 'nodes'
-# For label records harvested before node positions were stored: the
-# input.cfg of the inversion that produced them (None: re-harvest instead).
+# For label records harvested without node positions: the input.cfg of the
+# inversion, or a list of the input.cfg of every cycle in order (each
+# quantity takes the nodes of the last cycle that inverted it).
+# None: re-harvest or labels.restore_nodes instead.
 NODES_CFG = None
+# Largest acceptable |rebuilt - label| of the output representation (target
+# units: K, cm/s, G). Above it training stops ('error') or only warns
+# ('warn'): the network could not reproduce the labels even in principle.
+REPR_TOL = {'temp': 1.0, 'vlos': 1e3, 'vturb': 1e3,
+            'blong': 1.0, 'bhor': 1.0}
+REPR_CHECK = 'error'
 LTAU_GRID = np.linspace(-7.0, 0.8, 16)   # 'grid' representation / fallback
 # Smallest spread used to standardize each output (target units, velocities
 # in cm/s): outputs that barely vary across the training pixels, e.g. a node

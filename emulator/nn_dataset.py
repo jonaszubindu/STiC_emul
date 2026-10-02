@@ -30,14 +30,18 @@ from . import emu_config as C
 #
 # Every output channel has a quantity name (e.g. 'log_temp') and a log tau
 # position. Channels with the same name form a group, and a group's depth
-# profile is the linear interpolation between its positions, constant
-# beyond the outermost one. With the inversion's own nodes as positions
-# ('nodes' representation) this is exactly STiC's node expansion
-# (depthmodel.cc nodes2depth / linpol), so every kink is reproduced.
+# profile is the linear interpolation between its positions. With the
+# inversion's own nodes as positions ('nodes' representation) this is
+# exactly how STiC writes the atmosphere of a coupled (mode 5) inversion
+# (depthmodel.cc expandAtmos -> expand -> linpol(..., extrapolate=true)):
+# linear between nodes AND linearly continued beyond the outermost ones
+# (a single node: constant). Fixed-grid groups are constant beyond.
 # --------------------------------------------------------------------------- #
 
-def interp_matrix(xx, x):
-    """A with A @ y == np.interp(xx, x, y) for any y (x ascending)."""
+def interp_matrix(xx, x, extrapolate=False):
+    """A with A @ y == np.interp(xx, x, y) for any y (x ascending).
+    extrapolate: continue the first/last segment linearly beyond the
+    outermost points instead of holding their values (STiC's linpol)."""
     xx = np.asarray(xx, 'float64')
     x = np.asarray(x, 'float64')
     A = np.zeros((xx.size, x.size))
@@ -45,15 +49,30 @@ def interp_matrix(xx, x):
         A[:, 0] = 1.0
         return A
     for i, t in enumerate(xx):
-        if t <= x[0]:
+        if t <= x[0] and not extrapolate:
             A[i, 0] = 1.0
-        elif t >= x[-1]:
+        elif t >= x[-1] and not extrapolate:
             A[i, -1] = 1.0
         else:
-            k = int(np.searchsorted(x, t))       # x[k-1] < t <= x[k]
+            # segment containing t (x[k-1] < t <= x[k]); the end segments
+            # beyond the outermost points
+            k = int(np.clip(np.searchsorted(x, t), 1, x.size - 1))
             w = (t - x[k - 1]) / (x[k] - x[k - 1])
             A[i, k - 1], A[i, k] = 1.0 - w, w
     return A
+
+
+# output channel name -> atmospheric quantity it encodes
+_CHANNEL_VAR = {'log_temp': 'temp', 'temp': 'temp', 'vlos': 'vlos',
+                'vturb': 'vturb', 'blong': 'blong', 'bhor': 'bhor',
+                'bperp_c': 'bhor', 'bperp_s': 'bhor',
+                'azi': 'azi', 'azi_sin': 'azi', 'azi_cos': 'azi'}
+
+
+def target_extrap(names, exact):
+    """Per output channel: True where its group sits at STiC nodes (and is
+    therefore continued linearly beyond the outermost node, like STiC)."""
+    return np.array([bool(exact[_CHANNEL_VAR[str(n)]]) for n in names])
 
 
 def target_positions(nodes=None):
@@ -76,8 +95,8 @@ def profile_to_targets(ltau, prof, pos, exact):
     profiles are piecewise linear on `pos` (STiC nodes) and the node
     values are recovered by least squares (also off-grid nodes);
     otherwise the profiles are sampled at `pos`."""
-    A = interp_matrix(ltau, pos)                         # depth <- pos
     if exact:
+        A = interp_matrix(ltau, pos, extrapolate=True)   # depth <- pos
         sol = np.linalg.lstsq(A, np.asarray(prof, 'float64').T, rcond=None)[0]
         return sol.T
     return np.asarray(prof, 'float64') @ interp_matrix(pos, ltau).T
@@ -106,8 +125,9 @@ def encode_targets_arrays(ltau, arrs, pos, exact):
             # B_hor and azimuth at their own nodes (as STiC builds them),
             # then the vector (B_hor cos 2phi, B_hor sin 2phi) at the union
             P = pos['bperp']
-            bh = at('bhor') @ interp_matrix(P, pos['bhor']).T
-            az = at('azi') @ interp_matrix(P, pos['azi']).T
+            bh = at('bhor') @ interp_matrix(P, pos['bhor'],
+                                            exact['bhor']).T
+            az = at('azi') @ interp_matrix(P, pos['azi'], exact['azi']).T
             add('bperp_c', bh * np.cos(2 * az), P)
             add('bperp_s', bh * np.sin(2 * az), P)
             continue
@@ -122,13 +142,17 @@ def encode_targets_arrays(ltau, arrs, pos, exact):
     return np.hstack(cols), names, np.asarray(where, 'float64')
 
 
-def stratify(Y, names, where, depth):
+def stratify(Y, names, where, depth, extrap=None):
     """Outputs in target units -> physical stratifications on `depth`,
-    built like STiC: linear between channel positions, constant beyond.
-    Works for every encoding (old 16-point grid checkpoints included)."""
+    built like STiC: linear between channel positions; beyond the
+    outermost ones continued linearly where `extrap` (per channel, see
+    target_extrap) is set, constant otherwise. Works for every encoding
+    (old 16-point grid checkpoints included)."""
     names = np.asarray(names)
     where = np.asarray(where, 'float64')
     Y = np.asarray(Y, 'float64')
+    extrap = np.zeros(names.size, bool) if extrap is None \
+        else np.asarray(extrap, bool)
 
     def has(n):
         return bool(np.any(names == n))
@@ -139,7 +163,7 @@ def stratify(Y, names, where, depth):
         x, v = where[sel][order], Y[:, sel[order]]
         if f is not None:
             v = f(v)
-        return v @ interp_matrix(depth, x).T
+        return v @ interp_matrix(depth, x, bool(extrap[sel].any())).T
 
     out = {}
     out['temp'] = grp('log_temp', lambda v: 10.0 ** v) if has('log_temp') \
@@ -174,13 +198,13 @@ def dataset_nodes(recs):
             found.append({v: np.asarray(z[f'nodes_{v}'], 'float64')
                           for v in C.TARGET_VARS})
         elif C.NODES_CFG:
-            with open(C.NODES_CFG) as f:
-                found.append(tiles.stic_nodes(f.read(), z['ltau']))
+            found.append(tiles.stic_nodes_cycles(
+                tiles.read_cfgs(C.NODES_CFG), z['ltau']))
         else:
             raise ValueError(
                 'a label record carries no node positions: re-harvest it '
                 'with the current code, or set emu_config.NODES_CFG to the '
-                'input.cfg of the inversion that produced it')
+                'input.cfg(s) of the inversion cycles that produced it')
     ref = found[0]
     for d in found[1:]:
         for v in C.TARGET_VARS:
@@ -386,7 +410,7 @@ def build_dataset(label_dirs, chi2_max=None):
     nodes = dataset_nodes(recs)
     pos, exact = target_positions(nodes)
     depth = np.asarray(recs[0]['ltau'], 'float64')
-    _report_representation(recs[0], pos, exact, depth)
+    _check_representation(recs[0], pos, exact, depth)
     raw = [record_to_sample(z, stats=stats, chi2_thr=thr, pos=pos,
                             exact=exact, pol_over_i=C.POL_OVER_I)
            for z in recs]
@@ -427,7 +451,9 @@ def build_dataset(label_dirs, chi2_max=None):
                 chi2_threshold=thr, chi2_how=how,
                 split=dict(frac=C.VAL_FRACTION, block=C.VAL_BLOCK,
                            guard=C.VAL_GUARD, seed=C.VAL_SEED),
-                target_ltau=raw[0]['target_ltau'], depth_grid=depth,
+                target_ltau=raw[0]['target_ltau'],
+                target_extrap=target_extrap(raw[0]['target_names'], exact),
+                depth_grid=depth,
                 target_repr=C.TARGET_REPR if nodes is not None else 'grid',
                 nodes={v: [float(x) for x in nodes[v]] for v in nodes}
                 if nodes is not None else None,
@@ -454,20 +480,26 @@ def _floor_spread(ys, names):
     return out
 
 
-def _report_representation(rec, pos, exact, depth):
+def _check_representation(rec, pos, exact, depth):
     """How well the output representation reproduces the labels of one
-    record (exact up to float32 precision when the nodes match the
-    inversion; a large error means the node setup does not match)."""
+    record: exact up to float32 precision when the nodes match the
+    inversion. Above emu_config.REPR_TOL the network could not learn the
+    labels even in principle (systematic offsets also on training pixels),
+    so training stops unless REPR_CHECK = 'warn'."""
     arrs = {v: np.asarray(rec[v], 'float64') for v in C.TARGET_VARS}
     Y, names, where = encode_targets_arrays(depth, arrs, pos, exact)
-    back = stratify(Y, names, where, depth)
-    msg = []
+    back = stratify(Y, names, where, depth, target_extrap(names, exact))
+    msg, bad = [], []
     for v, unit, sc in (('temp', 'K', 1.0), ('vlos', 'km/s', 1e-5),
                         ('vturb', 'km/s', 1e-5), ('blong', 'G', 1.0),
                         ('bhor', 'G', 1.0)):
         lab = arrs[v].reshape(back[v].shape)
-        err = np.abs(back[v] - lab) * sc
-        msg.append(f'{v} {np.max(err):.3g} {unit}')
+        err = np.abs(back[v] - lab)
+        imax = np.unravel_index(np.argmax(err), err.shape)
+        msg.append(f'{v} {err[imax] * sc:.3g} {unit}')
+        if err[imax] > C.REPR_TOL[v]:
+            bad.append(f'{v} (max {err[imax] * sc:.3g} {unit} at log tau '
+                       f'{depth[imax[-1]]:.2f})')
     print('representation check (max |rebuilt - label| over one record): '
           + ', '.join(msg))
     for v in C.TARGET_VARS:
@@ -475,6 +507,19 @@ def _report_representation(rec, pos, exact, depth):
                else f'{len(pos[v])}-point grid')
         print(f'  {v}: {how} at log tau ' +
               ' '.join(f'{x:.2f}' for x in pos[v]))
+    if bad and C.TARGET_REPR == 'nodes':
+        txt = ('the output representation does not reproduce the labels: '
+               + '; '.join(bad) + '. The node positions stored in the '
+               'records are not the ones that built these profiles. A '
+               'quantity keeps the profile of the LAST cycle that inverted '
+               'it (nodes_<var> != 0), so give the input.cfg of every '
+               'cycle: labels.restore_nodes(record, [cfg_cycle1, '
+               'cfg_cycle2, ...]) or emu_config.NODES_CFG.')
+        if C.REPR_CHECK == 'warn':
+            print('WARNING: ' + txt)
+        else:
+            raise ValueError(txt + " (emu_config.REPR_CHECK = 'warn' "
+                             'trains anyway)')
 
 
 def rundir_to_sample(run_dir, stats, pol_over_i=False):

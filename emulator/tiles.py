@@ -165,9 +165,11 @@ def stic_nodes(cfg_text, ltau):
     calls nodeLocation()), so e.g. 5 nodes on [-8, 1] sit at
     -8, -5.8, -3.5, -1.3, 1 rather than -5.75 and -1.25.
 
-    STiC builds each quantity linearly between its nodes and keeps it
-    constant beyond the outermost ones (linpol, no extrapolation), i.e.
-    np.interp(depth, nodes, values).
+    The atmosphere a coupled (mode 5) inversion writes is built linearly
+    between the nodes and continued linearly beyond the outermost ones
+    (expandAtmos -> linpol with extrapolation; one node: constant).
+    Only the quantities inverted in that cycle are rebuilt, the others
+    pass through unchanged — see stic_nodes_cycles.
     """
     ltau = np.asarray(ltau, 'float64')
     dt = read_cfg_last(cfg_text, 'depth_t')
@@ -207,6 +209,33 @@ def stic_nodes(cfg_text, ltau):
             snapped = [_node_location(ltau, v) for v in vals]
             out[var] = np.unique(np.asarray(snapped, 'float64'))
     return out
+
+
+def stic_nodes_cycles(cfg_texts, ltau):
+    """Node positions for an atmosphere produced by several inversion
+    cycles (input.cfg texts in cycle order): a cycle rebuilds only the
+    quantities it inverts (nodes_<var> != 0) and passes the others through
+    from its input model, so each quantity takes the nodes of the LAST
+    cycle that inverted it."""
+    if isinstance(cfg_texts, str):
+        cfg_texts = [cfg_texts]
+    out = {v: np.zeros(0) for v in NODE_KEYS}
+    for txt in cfg_texts:
+        for v, x in stic_nodes(txt, ltau).items():
+            if len(x):
+                out[v] = x
+    return out
+
+
+def read_cfgs(paths):
+    """Text of one input.cfg path or of a list of them (cycle order)."""
+    if isinstance(paths, str):
+        paths = [paths]
+    texts = []
+    for p in paths:
+        with open(p) as f:
+            texts.append(f.read())
+    return texts
 
 
 def _node_location(ltau, x):

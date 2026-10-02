@@ -65,9 +65,10 @@ def nyquist_diagnostic(maps, coarse_cells):
 
 
 def _encoding_layout(enc):
-    """(names, positions per channel, output depth grid, pol_over_i) for
-    any checkpoint; older ones (fixed 16-point grid, no stored layout)
-    fall back to their LTAU_GRID and the former 55-point output grid."""
+    """(names, positions per channel, output depth grid, pol_over_i,
+    linear continuation per channel) for any checkpoint; older ones
+    (fixed 16-point grid, no stored layout) fall back to their LTAU_GRID
+    and the former 55-point output grid, constant beyond the ends."""
     names = [str(s) for s in enc['target_names']]
     grid = np.asarray(enc['ltau_grid'], 'float64')
     if 'target_ltau' in enc.files:
@@ -79,7 +80,9 @@ def _encoding_layout(enc):
     else:
         depth = np.linspace(grid[0], grid[-1], PREDICT_NDEP)
     pol = bool(enc['pol_over_i']) if 'pol_over_i' in enc.files else False
-    return names, where, depth, pol
+    extrap = np.asarray(enc['target_extrap'], bool) \
+        if 'target_extrap' in enc.files else np.zeros(len(names), bool)
+    return names, where, depth, pol, extrap
 
 
 def _member_spread(phys_members):
@@ -102,7 +105,7 @@ def predict(run_dir, ckpt_dir, out_dir):
     models, enc = load_ensemble(ckpt_dir, device)
     stats = {k[8:]: (enc[f'stat_mu_{k[8:]}'], enc[f'stat_sd_{k[8:]}'])
              for k in enc.files if k.startswith('stat_mu_')}
-    names, where, depth, pol = _encoding_layout(enc)
+    names, where, depth, pol, extrap = _encoding_layout(enc)
     ym, ys = enc['y_mean'], enc['y_std']
 
     sample, (ny, nx) = nd.rundir_to_sample(run_dir, stats, pol_over_i=pol)
@@ -127,9 +130,10 @@ def predict(run_dir, ckpt_dir, out_dir):
 
     # stratifications on the output depth grid, built like STiC builds
     # them from nodes (the inversion's own grid for node-based checkpoints)
-    phys = nd.stratify(mean, names, where, depth)
+    phys = nd.stratify(mean, names, where, depth, extrap)
     spread = _member_spread([nd.stratify(mus[k] * ys + ym, names, where,
-                                         depth) for k in range(len(models))])
+                                         depth, extrap)
+                             for k in range(len(models))])
 
     m = stic_io.Model(nt=1, ny=ny, nx=nx, ndep=depth.size)
     m.ltau[:] = depth[None, None, None, :]

@@ -304,8 +304,10 @@ def _region_chi2(run_dir, reg_file):
     return float(cmap[act].mean()), act
 
 
-def harvest(out_root, apron, atmos_name='atmosout_tile.nc'):
-    """Collect labels from all completed tiles into labels/<tile>.npz."""
+def harvest(out_root, apron, atmos_name='atmosout_tile.nc', node_cfgs=None):
+    """Collect labels from all completed tiles into labels/<tile>.npz.
+    node_cfgs: see harvest_rundir (default: each tile's input.cfg)."""
+    node_texts = tiles.read_cfgs(node_cfgs) if node_cfgs else None
     with open(os.path.join(out_root, 'index.json')) as f:
         index = json.load(f)['tiles']
     lab_dir = os.path.join(out_root, 'labels')
@@ -328,7 +330,7 @@ def harvest(out_root, apron, atmos_name='atmosout_tile.nc'):
             ltau=model.ltau[0, 0, 0],
             temp=model.temp[0], vlos=model.vlos[0], vturb=model.vturb[0],
             blong=model.Bln[0], bhor=model.Bho[0], azi=model.azi[0])
-        _store_nodes(rec_out, cfg_text, model.ltau[0, 0, 0])
+        _store_nodes(rec_out, node_texts or cfg_text, model.ltau[0, 0, 0])
 
         chi2s = {}
         for reg in regions:
@@ -371,16 +373,33 @@ def harvest(out_root, apron, atmos_name='atmosout_tile.nc'):
 # full-FOV coupled inversion as a label source — no tiles needed)
 # --------------------------------------------------------------------------- #
 
-def _store_nodes(rec_out, cfg_text, ltau):
+def _store_nodes(rec_out, cfg_texts, ltau):
     """Store the inversion's node positions per quantity in a label record
-    (needed for the 'nodes' target representation)."""
+    (needed for the 'nodes' target representation). cfg_texts: input.cfg
+    text, or the texts of all cycles in order (stic_nodes_cycles)."""
     try:
-        nodes = tiles.stic_nodes(cfg_text, ltau)
+        nodes = tiles.stic_nodes_cycles(cfg_texts, ltau)
     except ValueError as e:
         print(f'harvest: no node positions stored ({e})')
         return
     for v, x in nodes.items():
         rec_out[f'nodes_{v}'] = np.asarray(x, 'float64')
+    print('harvest: nodes ' + ', '.join(
+        f'{v} {len(x)}' if len(x) else f'{v} - (not inverted)'
+        for v, x in nodes.items()))
+
+
+def restore_nodes(record, node_cfgs):
+    """Rewrite the node positions of an existing label record (.npz) from
+    the input.cfg of every inversion cycle (list in cycle order) — no
+    re-harvest needed. Use when the record was harvested with a cfg in
+    which some quantities were not inverted (nodes_<var> = 0)."""
+    z = np.load(record, allow_pickle=False)
+    rec = {k: z[k] for k in z.files}
+    z.close()
+    _store_nodes(rec, tiles.read_cfgs(node_cfgs), rec['ltau'])
+    np.savez_compressed(record, **rec)
+    print(f'restore_nodes: {record} updated')
 
 
 def _fine_pixel_chi2(run_dir, regions, ny, nx):
@@ -418,13 +437,18 @@ def coarse_index(o, ny, nx):
     return row, col
 
 
-def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None):
+def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None,
+                   node_cfgs=None):
     """Harvest one label record from a full-FOV coupled run dir.
 
     Works on any run whose output atmosphere + degraded synthetics
     (out_obs_*.nc) exist — including a partially converged inversion:
     the record carries a per-fine-pixel chi2 map, and training keeps only
     the best-fitted pixels (emu_config PIXEL_CHI2_QUANTILE / _MAX).
+
+    node_cfgs: input.cfg of every cycle that built the atmosphere, in
+    order (default: run_dir/input.cfg only). Needed when the last cycle
+    did not invert every quantity.
     """
     from . import stic_io
     with open(os.path.join(run_dir, 'input.cfg')) as f:
@@ -443,7 +467,8 @@ def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None):
         temp=m.temp[0][sl], vlos=m.vlos[0][sl], vturb=m.vturb[0][sl],
         blong=m.Bln[0][sl], bhor=m.Bho[0][sl], azi=m.azi[0][sl],
         pixel_chi2=_fine_pixel_chi2(run_dir, regions, ny, nx)[sl])
-    _store_nodes(rec_out, cfg_text, m.ltau[0, 0, 0])
+    _store_nodes(rec_out, tiles.read_cfgs(node_cfgs) if node_cfgs
+                 else cfg_text, m.ltau[0, 0, 0])
 
     for reg in regions:
         tob = tiles.CoupledObs(os.path.join(run_dir, reg['obs_file']))
