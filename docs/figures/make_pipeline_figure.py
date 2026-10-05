@@ -189,6 +189,8 @@ row_y = [42.2, 33.6, 25.0, 16.4]       # bottom of each region row
 ICON = 6.4
 fx_feat = 33.2                          # x of feature-map icons
 geo_x0, geo_x1 = 41.6, 53.0
+N_REF = round(14 / REGIONS[0][3])       # reference-grid cells per icon side
+QX, QY = (8 + 0.5) / N_REF, (7 + 0.5) / N_REF   # centre of reference pixel
 for (inst, line, (ny, nx), cell, nch), y0 in zip(REGIONS, row_y):
     # input grid icon (same FOV, different pixel density)
     n_icon = max(3, round(14 / cell))
@@ -199,8 +201,14 @@ for (inst, line, (ny, nx), cell, nch), y0 in zip(REGIONS, row_y):
             f'{ny}×{nx} px, cell {cell:.2f}\n{nch}', fontsize=6.0,
             va='center',
             linespacing=1.2)
-    # query position marker on the icon
-    ax.plot(0.8 + 0.62 * ICON, y0 + 0.55 * ICON, 'o', ms=2.4,
+    # query position: the centre of one reference-grid pixel; on coarser
+    # grids the same sky position falls inside a pixel (shaded), generally
+    # off its centre -> bilinear sampling + sub-cell offset
+    ax.add_patch(Rectangle((0.8 + ICON * int(QX * n_icon) / n_icon,
+                            y0 + ICON * int(QY * n_icon) / n_icon),
+                           ICON / n_icon, ICON / n_icon, fc='#C0392B',
+                           alpha=0.18, lw=0, zorder=3))
+    ax.plot(0.8 + QX * ICON, y0 + QY * ICON, 'o', ms=2.4,
             color='#C0392B', zorder=5)
     # encoder
     box(19.4, y0 + 0.4, 11.6, ICON - 0.8,
@@ -222,8 +230,11 @@ for (inst, line, (ny, nx), cell, nch), y0 in zip(REGIONS, row_y):
 
 # legend for the query marker
 ax.plot(1.4, 14.0, 'o', ms=2.4, color='#C0392B')
-ax.text(2.4, 14.0, r'query pixel $\mathbf{k}$: the same sky position, '
-        'looked up on every instrument grid', fontsize=6.0, va='center')
+ax.text(2.4, 14.0, r'query pixel $\mathbf{k}$ (centre of a reference-grid '
+        'pixel): the same sky position on every instrument grid; on the '
+        'coarser grids it\nfalls inside a pixel (shaded), generally off '
+        r'its centre $\rightarrow$ bilinear sampling + sub-cell offset '
+        r'$\delta_r$', fontsize=6.0, va='center', linespacing=1.3)
 
 # geometry-aware sampling (spans all rows)
 y_lo, y_hi = row_y[-1] - 0.2, row_y[0] + ICON + 0.2
