@@ -52,6 +52,25 @@ python -m emulator.predict_map <map_run_dir> --ckpt <ckpt_dir> --out <pred>
 maps, and `nyquist.json` (checkerboard null-space diagnostic; chi2 is
 blind to it).
 
+## Applying a trained emulator to new data
+
+Prepare each new frame / FOV exactly like for a coupled STiC inversion
+(obs_*.nc with psf/lts/ltargs/ds, inst_*.nc, input.cfg), then
+
+```bash
+python -m emulator.apply --ckpt <ckpt_dir> --out <out> <run_dir> [<run_dir> ...]
+```
+
+Per run dir: an input check (`input_check.json`; a different region
+layout, wavelength set or fitted Stokes parameters stops the run, intensity
+levels far from the training data are flagged), `predicted_atmos.nc`
+(STiC model; top gas pressure `--pgas-top`, default 1.0, or
+`--boundary-model <starting model>`), the ensemble spread
+(`prediction.npz`) and `quicklook.png`. Data-space verification of any
+prediction: `python -m emulator.chi2_compare -h` (STiC mode 2 + the
+verified degradation operators). Overview figure:
+`docs/figures/make_application_figure.py`.
+
 ## Two-cluster operation
 
 Every cross-machine hand-off is a small file transfer (labels ~tens of

@@ -99,10 +99,17 @@ def _member_spread(phys_members):
     return out
 
 
-def predict(run_dir, ckpt_dir, out_dir):
+def predict(run_dir, ckpt_dir, out_dir, pgas_top=1.0, ensemble=None):
+    """pgas_top: gas pressure at the top of the atmosphere (scalar or
+    (ny, nx)), STiC's boundary for hydrostatic equilibrium; use the value
+    of the starting model an inversion of these data would get.
+    ensemble: (models, enc, device) already loaded (several run dirs)."""
     os.makedirs(out_dir, exist_ok=True)
-    device = _device()
-    models, enc = load_ensemble(ckpt_dir, device)
+    if ensemble is None:
+        device = _device()
+        models, enc = load_ensemble(ckpt_dir, device)
+    else:
+        models, enc, device = ensemble
     stats = {k[8:]: (enc[f'stat_mu_{k[8:]}'], enc[f'stat_sd_{k[8:]}'])
              for k in enc.files if k.startswith('stat_mu_')}
     names, where, depth, pol, extrap = _encoding_layout(enc)
@@ -137,7 +144,12 @@ def predict(run_dir, ckpt_dir, out_dir):
 
     m = stic_io.Model(nt=1, ny=ny, nx=nx, ndep=depth.size)
     m.ltau[:] = depth[None, None, None, :]
-    m.pgas[:] = 1.0
+    # STiC recomputes the pressure stratification by hydrostatic
+    # equilibrium from T and the top gas pressure: a constant column
+    # carrying the boundary value is all it needs
+    m.pgas[0] = np.broadcast_to(np.asarray(pgas_top, 'float32')[..., None],
+                                (ny, nx, depth.size)) \
+        if np.ndim(pgas_top) else float(pgas_top)
     for v, arr in phys.items():
         a = stic_io._ATTR.get(v, v)
         getattr(m, a)[0] = arr.reshape(ny, nx, -1)
@@ -180,5 +192,7 @@ if __name__ == '__main__':
     ap.add_argument('run_dir')
     ap.add_argument('--ckpt', required=True)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--pgas-top', type=float, default=1.0,
+                    help='top gas pressure (hydrostatic boundary)')
     a = ap.parse_args()
-    predict(a.run_dir, a.ckpt, a.out)
+    predict(a.run_dir, a.ckpt, a.out, pgas_top=a.pgas_top)

@@ -502,8 +502,22 @@ def build_dataset(label_dirs, chi2_max=None):
                 nodes={v: [float(x) for x in nodes[v]] for v in nodes}
                 if nodes is not None else None,
                 pol_over_i=bool(C.POL_OVER_I),
-                b_perp_vector=bool(C.B_PERP_VECTOR))
+                b_perp_vector=bool(C.B_PERP_VECTOR),
+                channels=input_channels(recs[0]))
     return raw, meta
+
+
+def input_channels(rec):
+    """Wavelength and Stokes index of every network input channel per
+    region, so that new data can be checked against the training layout."""
+    out = {}
+    tags = sorted({k.rsplit('_', 1)[0] for k in rec.files
+                   if k.endswith('_dat')})
+    for tag in tags:
+        w, s = _used_channels(np.asarray(rec[f'{tag}_weights']))
+        out[tag] = (np.asarray(rec[f'{tag}_wav'], 'float64')[w],
+                    s.astype('int32'))
+    return out
 
 
 def _floor_spread(ys, names):
@@ -573,8 +587,10 @@ def rundir_to_sample(run_dir, stats, pol_over_i=False):
         regs = tiles.parse_regions(f.read())
     regions = {}
     for reg in regs:
-        o = tiles.CoupledObs(os.path.join(run_dir, reg['obs_file']))
         tag = os.path.splitext(os.path.basename(reg['obs_file']))[0]
+        if tag not in stats:
+            continue                    # region the network was not trained on
+        o = tiles.CoupledObs(os.path.join(run_dir, reg['obs_file']))
         img = region_channels(o.dat[0], o.weights, pol_over_i)
         mu, sd = stats[tag]
         img = (np.nan_to_num(img) - mu[:, None, None]) / sd[:, None, None]

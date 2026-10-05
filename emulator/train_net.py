@@ -180,6 +180,10 @@ def train_ensemble(label_dirs, out_dir, steps=None, n_ensemble=None,
                  depth_grid=np.asarray(meta['depth_grid']),
                  pol_over_i=meta['pol_over_i'],
                  ltau_grid=C.LTAU_GRID,
+                 **{f'chan_wav_{t}': w
+                    for t, (w, s) in meta['channels'].items()},
+                 **{f'chan_stokes_{t}': s
+                    for t, (w, s) in meta['channels'].items()},
                  **{f'stat_mu_{t}': meta['stats'][t][0]
                     for t in meta['stats']},
                  **{f'stat_sd_{t}': meta['stats'][t][1]
