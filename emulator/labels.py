@@ -272,12 +272,16 @@ def out_obs_path(run_dir, obs_file):
     return None
 
 
-def _region_chi2_map(run_dir, reg_file):
+def _region_chi2_map(run_dir, reg_file, out_dir=None):
     """Per-observed-pixel reduced chi2 of one region from STiC's
-    degraded output (out_<reg>.nc). Returns (chi2_map, act_mask)."""
+    degraded output (out_<reg>.nc, looked up in out_dir, default run_dir).
+    Returns (chi2_map, act_mask)."""
     from netCDF4 import Dataset
     tob = tiles.CoupledObs(os.path.join(run_dir, reg_file))
-    path = out_obs_path(run_dir, reg_file)
+    path = out_obs_path(out_dir or run_dir, reg_file)
+    if path is None:
+        raise FileNotFoundError(f'no out_ file for {reg_file} in '
+                                f'{out_dir or run_dir}')
     with Dataset(path) as f:
         if f.variables['profiles'].shape[0] == 0:
             raise RuntimeError(
@@ -403,16 +407,17 @@ def restore_nodes(record, node_cfgs):
     print(f'restore_nodes: {record} updated')
 
 
-def _fine_pixel_chi2(run_dir, regions, ny, nx):
+def _fine_pixel_chi2(run_dir, regions, ny, nx, out_dir=None):
     """Combine the per-region chi2 maps into one per-FINE-pixel map
     (max over regions): fine-grid regions map 1:1; coarse regions are
     looked up at the nearest observed pixel through the stored geometry
-    (first-order warp inverse w ~ k - ds(k))."""
+    (first-order warp inverse w ~ k - ds(k)). out_dir: where the out_
+    files are (default run_dir)."""
     total = np.zeros((ny, nx))
     for reg in regions:
-        if out_obs_path(run_dir, reg['obs_file']) is None:
+        if out_obs_path(out_dir or run_dir, reg['obs_file']) is None:
             continue
-        cmap, act = _region_chi2_map(run_dir, reg['obs_file'])
+        cmap, act = _region_chi2_map(run_dir, reg['obs_file'], out_dir)
         cmap = np.where(act, cmap, 0.0)   # masked obs pixels: no constraint
         o = tiles.CoupledObs(os.path.join(run_dir, reg['obs_file']))
         if int(o.lts[0]) < 0:
