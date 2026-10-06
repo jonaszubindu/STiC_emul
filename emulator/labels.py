@@ -300,9 +300,9 @@ def _region_chi2_map(run_dir, reg_file, out_dir=None):
     return (r * r).sum(axis=(2, 3)) / ndata, act
 
 
-def _region_chi2(run_dir, reg_file):
+def _region_chi2(run_dir, reg_file, out_dir=None):
     """Mean reduced chi2 over active pixels (backward-compatible)."""
-    cmap, act = _region_chi2_map(run_dir, reg_file)
+    cmap, act = _region_chi2_map(run_dir, reg_file, out_dir)
     if not act.any():
         return np.nan, act
     return float(cmap[act].mean()), act
@@ -444,7 +444,7 @@ def coarse_index(o, ny, nx):
 
 
 def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None,
-                   node_cfgs=None):
+                   node_cfgs=None, out_dir=None):
     """Harvest one label record from a full-FOV coupled run dir.
 
     Works on any run whose output atmosphere + degraded synthetics
@@ -455,6 +455,13 @@ def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None,
     node_cfgs: input.cfg of every cycle that built the atmosphere, in
     order (default: run_dir/input.cfg only). Needed when the last cycle
     did not invert every quantity.
+
+    out_dir: where the degraded synthetics (out_<obs> files) of this
+    atmosphere are, e.g. rebuilt with degrade_synthetic (default run_dir).
+
+    apron: border width dropped from the labels. A full-map inversion has
+    no tile edges, so 0 keeps the FOV borders as labels (the pixel chi2
+    filter still removes badly fitted border pixels).
     """
     from . import stic_io
     with open(os.path.join(run_dir, 'input.cfg')) as f:
@@ -472,7 +479,8 @@ def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None,
         ltau=m.ltau[0, 0, 0],
         temp=m.temp[0][sl], vlos=m.vlos[0][sl], vturb=m.vturb[0][sl],
         blong=m.Bln[0][sl], bhor=m.Bho[0][sl], azi=m.azi[0][sl],
-        pixel_chi2=_fine_pixel_chi2(run_dir, regions, ny, nx)[sl])
+        pixel_chi2=_fine_pixel_chi2(run_dir, regions, ny, nx,
+                                    out_dir=out_dir)[sl])
     _store_nodes(rec_out, tiles.read_cfgs(node_cfgs) if node_cfgs
                  else cfg_text, m.ltau[0, 0, 0])
 
@@ -486,13 +494,13 @@ def harvest_rundir(run_dir, apron, out_file=None, atmos_name=None,
         rec_out[f'{tag}_lts'] = tob.lts
         rec_out[f'{tag}_ltargs'] = tob.ltargs
         rec_out[f'{tag}_ds'] = tob.ds.astype('float32')
-        if out_obs_path(run_dir, reg['obs_file']):
-            c2, _ = _region_chi2(run_dir, reg['obs_file'])
+        if out_obs_path(out_dir or run_dir, reg['obs_file']):
+            c2, _ = _region_chi2(run_dir, reg['obs_file'], out_dir)
             rec_out[f'{tag}_chi2'] = c2
 
     if not any(k.endswith('_chi2') for k in rec_out):
         print('WARNING: no out_<obs>.nc degraded synthetics found in '
-              f'{run_dir} — pixel_chi2 is all zero, so NO chi2 filtering '
+              f'{out_dir or run_dir} — pixel_chi2 is all zero, so NO chi2 filtering '
               'will happen. Run one STiC iteration that writes them, or '
               'treat these labels as unvetted.')
     if out_file is None:

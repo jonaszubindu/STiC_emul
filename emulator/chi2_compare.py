@@ -113,6 +113,45 @@ def _read_out(run_dir, out_dir, obs_file):
         return np.ma.filled(f.variables['profiles'][0], np.nan)
 
 
+def _region_parts(run_dir, out_dir, obs_file, o):
+    """chi2 of one region against the observations on the region's grid,
+    split into the Stokes I and the Q, U, V contributions (same
+    normalization as STiC's chi2, so I + QUV = total). For a region with a
+    single fitted wavelength (a continuum point) also the relative
+    intensity error |obs - syn| / obs: there the residual passes close to
+    zero for many pixels and a chi2 ratio is ill-conditioned."""
+    syn = _read_out(run_dir, out_dir, obs_file)
+    use = o.weights < 1e10                              # (nw, ns)
+    sig = np.where(use, o.weights, np.inf)
+    r = (o.dat[0] - syn) / sig[None, None]
+    r2 = np.where(np.isfinite(r), r * r, 0.0)
+    ndata = max(int(use.sum()), 1)
+    act = o.pweights[0] > 0
+    nan = lambda a: np.where(act, a, np.nan)
+    out = dict(total=nan(r2.sum(axis=(2, 3)) / ndata),
+               I=nan(r2[..., 0].sum(axis=-1) / ndata), QUV=None, rel=None)
+    if o.ns > 1 and use[:, 1:].any():
+        out['QUV'] = nan(r2[..., 1:].sum(axis=(2, 3)) / ndata)
+    wl = np.where(use.any(axis=1))[0]
+    if wl.size == 1 and use[wl[0], 0]:
+        ob = o.dat[0, :, :, wl[0], 0]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            out['rel'] = nan(np.abs(ob - syn[:, :, wl[0], 0]) / np.abs(ob))
+    return out
+
+
+def _rel_stats(ri, re):
+    ok = np.isfinite(ri) & np.isfinite(re)
+    if ok.sum() == 0:
+        return None
+    return dict(N=int(ok.sum()),
+                rel_err_inv_median=float(np.median(ri[ok])),
+                rel_err_emu_median=float(np.median(re[ok])),
+                rel_err_inv_p90=float(np.percentile(ri[ok], 90)),
+                rel_err_emu_p90=float(np.percentile(re[ok], 90)),
+                frac_emu_closer=float(np.mean(re[ok] <= ri[ok])))
+
+
 def _category_map(labels_file, ckpt_dir, shape):
     """Training category per fine pixel (-1: outside the label record,
     e.g. the apron)."""
@@ -151,10 +190,11 @@ def compare(run_dir, inv_dir, emu_dir, out_dir, labels_file=None,
     # per region, on the region's own grid; inactive pixels -> NaN
     per_region = {}
     for r in regs:
-        ci, act = labels._region_chi2_map(run_dir, r['obs_file'], inv_dir)
-        ce, _ = labels._region_chi2_map(run_dir, r['obs_file'], emu_dir)
-        per_region[region_tag(r['obs_file'])] = (
-            np.where(act, ci, np.nan), np.where(act, ce, np.nan), r)
+        o = obs[r['obs_file']]
+        per_region[region_tag(r['obs_file'])] = dict(
+            inv=_region_parts(run_dir, inv_dir, r['obs_file'], o),
+            emu=_region_parts(run_dir, emu_dir, r['obs_file'], o),
+            fine=int(o.lts[0]) < 0)
     # all regions combined per fine pixel (worst region, as for the labels)
     fi = labels._fine_pixel_chi2(run_dir, regs, *shape, out_dir=inv_dir)
     fe = labels._fine_pixel_chi2(run_dir, regs, *shape, out_dir=emu_dir)
@@ -189,11 +229,24 @@ def compare(run_dir, inv_dir, emu_dir, out_dir, labels_file=None,
           'as good: fraction of pixels with emulator chi2 <= 1.01 x '
           'inversion chi2; emu>2x: more than twice the inversion chi2')
     print(head)
-    for tag, (ci, ce, _) in per_region.items():
-        s = _stats(ci, ce)
-        if s:
-            summary['regions'][tag] = s
-            line(tag, s)
+    rel_lines = []
+    for tag, pr in per_region.items():
+        s = _stats(pr['inv']['total'], pr['emu']['total'])
+        if not s:
+            continue
+        summary['regions'][tag] = s
+        line(tag, s)
+        if pr['inv']['QUV'] is not None:
+            for part in ('I', 'QUV'):
+                sp = _stats(pr['inv'][part], pr['emu'][part])
+                if sp:
+                    s[f'stokes_{part}'] = sp
+                    line(f'  Stokes {part}', sp)
+        if pr['inv']['rel'] is not None:
+            sr = _rel_stats(pr['inv']['rel'], pr['emu']['rel'])
+            if sr:
+                s['rel_intensity_error'] = sr
+                rel_lines.append((tag, sr))
     s = _stats(fi, fe)
     summary['all_regions']['all'] = s
     line('all regions (worst)', s)
@@ -204,6 +257,16 @@ def compare(run_dir, inv_dir, emu_dir, out_dir, labels_file=None,
             if s:
                 summary['all_regions'][c] = s
                 line(f'  {c}', s)
+
+    if rel_lines:
+        print('\nsingle-wavelength regions: relative intensity error '
+              '|obs - syn| / obs (median, 90th percentile)')
+        for tag, sr in rel_lines:
+            print(f'{tag:22s} inversion {100 * sr["rel_err_inv_median"]:.2f}% '
+                  f'/ {100 * sr["rel_err_inv_p90"]:.2f}%   emulator '
+                  f'{100 * sr["rel_err_emu_median"]:.2f}% / '
+                  f'{100 * sr["rel_err_emu_p90"]:.2f}%   emulator closer in '
+                  f'{100 * sr["frac_emu_closer"]:.0f}% of pixels')
 
     with open(os.path.join(out_dir, 'chi2_summary.json'), 'w') as f:
         json.dump(summary, f, indent=1)
@@ -235,32 +298,64 @@ def _save(plt, fig, out_dir, name):
 
 
 def _maps_figure(plt, per_region, obs, fi, fe, cat, out_dir):
-    """inversion chi2 | emulator chi2 | log10(emulator / inversion), one
-    row per region plus all regions combined on the fine grid."""
+    """Per region: inversion chi2 | emulator chi2 | log10(emulator /
+    inversion), and for full-Stokes regions the ratio of the Stokes I and
+    the Q, U, V parts; single-wavelength regions show the relative
+    intensity error instead. Last row: all regions combined (fine grid)."""
     from matplotlib.colors import LogNorm
-    rows = [(tag, ci, ce, int(obs[r['obs_file']].lts[0]) < 0)
-            for tag, (ci, ce, r) in per_region.items()]
-    rows.append(('all regions (worst, fine grid)', fi, fe, True))
-    fig, axs = plt.subplots(len(rows), 3, figsize=(15, 4.0 * len(rows)),
+
+    def lratio(a, b):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.log10(b / a)
+
+    rows = []
+    for tag, pr in per_region.items():
+        pi, pe = pr['inv'], pr['emu']
+        if pi['rel'] is not None:
+            rows.append((tag, 'rel', pi['rel'] * 100, pe['rel'] * 100, None,
+                         None, pr['fine']))
+        else:
+            quv = pi['QUV'] is not None
+            rows.append((tag, 'chi2', pi['total'], pe['total'],
+                         lratio(pi['I'], pe['I']) if quv else None,
+                         lratio(pi['QUV'], pe['QUV']) if quv else None,
+                         pr['fine']))
+    rows.append(('all regions (worst, fine grid)', 'chi2', fi, fe, None, None,
+                 True))
+
+    fig, axs = plt.subplots(len(rows), 5, figsize=(24, 4.0 * len(rows)),
                             constrained_layout=True)
     axs = np.atleast_2d(axs)
-    for k, (tag, ci, ce, fine) in enumerate(rows):
-        both = np.r_[ci[np.isfinite(ci) & (ci > 0)],
-                     ce[np.isfinite(ce) & (ce > 0)]]
-        lo, hi = np.percentile(both, [1, 99]) if both.size else (1, 10)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            lr = np.log10(ce / ci)
-        lim = max(0.1, float(np.nanpercentile(np.abs(lr), 99)))
-        for c, (img, title) in enumerate([(ci, 'inversion chi2'),
-                                          (ce, 'emulator chi2'),
-                                          (lr, 'log10(emulator / inversion)')]):
+    for k, (tag, kind, a, b, lr_i, lr_q, fine) in enumerate(rows):
+        if kind == 'chi2':
+            both = np.r_[a[np.isfinite(a) & (a > 0)], b[np.isfinite(b) & (b > 0)]]
+            lo, hi = np.percentile(both, [1, 99]) if both.size else (1, 10)
+            panels = [(a, 'inversion chi2', 'magma', LogNorm(lo, hi)),
+                      (b, 'emulator chi2', 'magma', LogNorm(lo, hi)),
+                      (lratio(a, b), 'log10(emulator / inversion)', 'div', None),
+                      (lr_i, 'Stokes I part: log10(emu / inv)', 'div', None),
+                      (lr_q, 'Stokes Q,U,V part: log10(emu / inv)', 'div', None)]
+        else:
+            hi = float(np.nanpercentile(np.r_[a.ravel(), b.ravel()], 99))
+            d = b - a
+            panels = [(a, 'inversion |dI/I| [%]', 'magma', (0, hi)),
+                      (b, 'emulator |dI/I| [%]', 'magma', (0, hi)),
+                      (d, 'emulator - inversion [% points]', 'div%', None),
+                      (None, '', '', None), (None, '', '', None)]
+        for c, (img, title, cm, norm) in enumerate(panels):
             ax = axs[k, c]
-            if c < 2:
-                im = ax.imshow(img, origin='lower', cmap='magma',
-                               norm=LogNorm(vmin=lo, vmax=hi))
-            else:
+            if img is None:
+                ax.set_axis_off()
+                continue
+            if cm in ('div', 'div%'):
+                lim = max(0.1, float(np.nanpercentile(np.abs(img), 99)))
                 im = ax.imshow(img, origin='lower', cmap='RdBu_r',
                                vmin=-lim, vmax=lim)
+            elif isinstance(norm, tuple):
+                im = ax.imshow(img, origin='lower', cmap=cm, vmin=norm[0],
+                               vmax=norm[1])
+            else:
+                im = ax.imshow(img, origin='lower', cmap=cm, norm=norm)
             fig.colorbar(im, ax=ax, shrink=0.85)
             ax.set_title(f'{tag}: {title}', fontsize=10)
             if fine and cat is not None and img.shape == cat.shape:
@@ -270,7 +365,7 @@ def _maps_figure(plt, per_region, obs, fi, fe, cat, out_dir):
                 ax.contour((cat == 1).astype(float), levels=[0.5],
                            colors='c' if c < 2 else 'k', linewidths=0.9,
                            linestyles='--')
-    fig.suptitle('chi2 against the observations   (red: emulator fits worse, '
+    fig.suptitle('fit to the observations   (red: emulator fits worse, '
                  'blue: better;   solid outline: excluded by the chi2 filter, '
                  'dashed: held-out blocks)', fontsize=11)
     _save(plt, fig, out_dir, 'chi2_maps.png')
